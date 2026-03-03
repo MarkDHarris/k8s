@@ -27,9 +27,14 @@ src/
     │   ├── 03-global-path/     ClusterRole → ClusterRoleBinding
     │   └── README.md           Progressive walkthrough
     │
-    └── tekton-pipelines/       Tekton CI/CD pipeline lab
-        ├── 01-10 YAML files    Progressive labs from hello-world to build pipelines
-        └── README.md           Full lab guide with production pipeline analysis
+    ├── tekton-pipelines/       Tekton CI/CD pipeline lab
+    │   ├── 01-12 YAML files    Progressive labs from hello-world to build pipelines
+    │   └── README.md           Full lab guide with production pipeline analysis
+    │
+    └── argocd/                 Argo CD GitOps delivery lab
+        ├── 01-09 YAML files    Progressive labs from first app to projects + RBAC
+        ├── apps/               Sample app manifests (guestbook, kustomize overlays)
+        └── README.md           Full lab guide covering 7 progressive labs
 ```
 
 ---
@@ -79,9 +84,15 @@ See [src/research/rbac-test/README.md](src/research/rbac-test/README.md).
 
 ### Tekton Pipelines
 
-Five progressive labs that take you from a hello-world Task to a multi-stage build pipeline, then decode a production pipeline.
+Six progressive labs that take you from a hello-world Task to a multi-stage cross-compilation build pipeline, then decode a production pipeline.
 
 See [src/research/tekton-pipelines/README.md](src/research/tekton-pipelines/README.md).
+
+### Argo CD (GitOps)
+
+Seven progressive labs covering declarative application deployment, auto-sync, self-healing, Helm charts, Kustomize overlays, App of Apps, and project RBAC.
+
+See [src/research/argocd/README.md](src/research/argocd/README.md).
 
 ---
 
@@ -95,3 +106,4 @@ See [src/research/tekton-pipelines/README.md](src/research/tekton-pipelines/READ
 | **Terraform** | `brew install terraform` (only for Option A) |
 | **Helm** | `brew install helm` (optional) |
 | **tkn** | `brew install tektoncd-cli` (for Tekton labs) |
+| **argocd** | `brew install argocd` (for Argo CD labs) |

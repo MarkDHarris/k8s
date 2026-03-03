@@ -1,0 +1,17 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: guestbook-prod
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/MarkDHarris/k8s.git
+    targetRevision: HEAD
+    path: src/research/argocd/apps/kustomize-guestbook/overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true

@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: team-alpha
+  namespace: argocd
+spec:
+  description: Restricted project for Team Alpha -- only deploy to team-alpha namespace
+  sourceRepos:
+    - "https://github.com/argoproj/argocd-example-apps.git"
+    - "https://github.com/MarkDHarris/k8s.git"
+  destinations:
+    - namespace: team-alpha
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist: []
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: Service
+    - group: apps
+      kind: Deployment
+    - group: ""
+      kind: ConfigMap
+    - group: ""
+      kind: Secret
