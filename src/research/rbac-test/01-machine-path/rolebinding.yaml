@@ -5,7 +5,7 @@ metadata:
   namespace: rbac-test
 subjects:
 - kind: ServiceAccount
-  name: myappsa
+  name: my-app-sa
 roleRef:
   kind: Role
   name: pod-reader

@@ -21,5 +21,5 @@ k apply -f ./rolebinding.yaml
 ### Impersonate the service account to check if it has permissions to list pods
 
 ```bash
-k auth can-i list pods --as=system:serviceaccount:rbac-test:myappsa -n rbac-test
+kubectl auth can-i list pods --as=system:serviceaccount:rbac-test:my-app-sa -n rbac-test
 ```
