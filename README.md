@@ -1,6 +1,6 @@
 # k8s
 
-A local Kubernetes learning environment built on [Kind](https://kind.sigs.k8s.io/) (Kubernetes IN Docker). Includes Terraform for automated cluster provisioning, sample app deployments, and hands-on RBAC experiments.
+A local Kubernetes learning environment built on [Kind](https://kind.sigs.k8s.io/) (Kubernetes IN Docker). Includes Terraform for automated cluster provisioning, sample app deployments, and hands-on research labs.
 
 ---
 
@@ -8,23 +8,28 @@ A local Kubernetes learning environment built on [Kind](https://kind.sigs.k8s.io
 
 ```
 src/
-├── terraform/            Cluster provisioning (Terraform + Kind provider)
-│   ├── main.tf           Orchestrates cluster, ingress controller, and demo nginx
+├── terraform/                  Cluster provisioning (Terraform + Kind provider)
+│   ├── main.tf                 Orchestrates cluster, ingress controller, and demo nginx
 │   ├── modules/
-│   │   └── kind-cluster/ Reusable Kind cluster module
-│   └── README.md         Comprehensive walkthrough with learning exercises
+│   │   └── kind-cluster/       Reusable Kind cluster module
+│   └── README.md               Comprehensive walkthrough with 12 learning exercises
 │
-├── apps/                 Sample application deployments
-│   └── nginx/            Manual nginx deployment via kubectl (NodePort pattern)
-│       ├── cluster.yaml  Kind cluster config (standalone, not Terraform)
-│       ├── nginx.yaml    Service + Deployment manifests
-│       └── README.md     Traffic flow walkthrough
+├── apps/                       Sample application deployments
+│   └── nginx/                  Manual nginx deployment via kubectl (NodePort pattern)
+│       ├── cluster.yaml        Kind cluster config (standalone, not Terraform)
+│       ├── nginx.yaml          Service + Deployment manifests
+│       └── README.md           Traffic flow walkthrough
 │
-└── rbac-test/            RBAC learning experiments
-    ├── 01-machine-path/  ServiceAccount → Role → RoleBinding
-    ├── 02-human-path/    X.509 certs → Group → RoleBinding
-    ├── 03-global-path/   ClusterRole → ClusterRoleBinding
-    └── README.md         Progressive walkthrough of all three paths
+└── research/                   Hands-on learning labs
+    ├── rbac-test/              RBAC experiments (3 progressive paths)
+    │   ├── 01-machine-path/    ServiceAccount → Role → RoleBinding
+    │   ├── 02-human-path/      X.509 certs → Group → RoleBinding
+    │   ├── 03-global-path/     ClusterRole → ClusterRoleBinding
+    │   └── README.md           Progressive walkthrough
+    │
+    └── tekton-pipelines/       Tekton CI/CD pipeline lab
+        ├── 01-10 YAML files    Progressive labs from hello-world to build pipelines
+        └── README.md           Full lab guide with production pipeline analysis
 ```
 
 ---
@@ -62,15 +67,21 @@ See [src/apps/nginx/README.md](src/apps/nginx/README.md) for the traffic flow ex
 
 ---
 
-## RBAC Experiments
+## Research Labs
 
-After you have a running cluster (via either option above), work through the RBAC labs:
+After you have a running cluster (via either option above), work through the labs:
 
-```bash
-cd src/rbac-test
-```
+### RBAC
 
-Three progressive paths covering ServiceAccount auth, X.509 certificate auth, and cluster-wide permissions. See [src/rbac-test/README.md](src/rbac-test/README.md) for the full walkthrough.
+Three progressive paths covering ServiceAccount auth, X.509 certificate auth, and cluster-wide permissions.
+
+See [src/research/rbac-test/README.md](src/research/rbac-test/README.md).
+
+### Tekton Pipelines
+
+Five progressive labs that take you from a hello-world Task to a multi-stage build pipeline, then decode a production pipeline.
+
+See [src/research/tekton-pipelines/README.md](src/research/tekton-pipelines/README.md).
 
 ---
 
@@ -83,3 +94,4 @@ Three progressive paths covering ServiceAccount auth, X.509 certificate auth, an
 | **kubectl** | `brew install kubectl` |
 | **Terraform** | `brew install terraform` (only for Option A) |
 | **Helm** | `brew install helm` (optional) |
+| **tkn** | `brew install tektoncd-cli` (for Tekton labs) |

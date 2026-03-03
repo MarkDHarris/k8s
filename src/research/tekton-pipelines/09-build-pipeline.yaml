@@ -1,0 +1,189 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: git-clone-simple
+spec:
+  params:
+    - name: url
+      type: string
+      description: Git repository URL
+    - name: revision
+      type: string
+      description: Branch, tag, or commit SHA to checkout
+      default: main
+  workspaces:
+    - name: output
+      description: The cloned repository will be placed here
+  results:
+    - name: commit-sha
+      description: The exact commit SHA that was checked out
+  steps:
+    - name: clone
+      image: alpine/git:latest
+      script: |
+        echo "Cloning $(params.url) @ $(params.revision)..."
+        git clone --depth 1 --branch $(params.revision) $(params.url) $(workspaces.output.path)/source
+        cd $(workspaces.output.path)/source
+        SHA=$(git rev-parse HEAD)
+        echo -n "$SHA" > $(results.commit-sha.path)
+        echo "Cloned at commit: $SHA"
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: run-tests
+spec:
+  workspaces:
+    - name: source
+  results:
+    - name: status
+      description: PASS or FAIL
+  steps:
+    - name: test
+      image: alpine:3
+      script: |
+        echo "===== Running Tests ====="
+        cd $(workspaces.source.path)/source
+        echo "Repository contents:"
+        ls -la
+
+        PASS=true
+
+        if [ -f README.md ]; then
+          echo "PASS: README.md exists"
+        else
+          echo "FAIL: README.md missing"
+          PASS=false
+        fi
+
+        if [ -d .git ]; then
+          echo "PASS: .git directory present"
+        else
+          echo "FAIL: Not a git repository"
+          PASS=false
+        fi
+
+        if [ "$PASS" = true ]; then
+          echo -n "PASS" > $(results.status.path)
+          echo "===== All tests passed ====="
+        else
+          echo -n "FAIL" > $(results.status.path)
+          echo "===== Tests FAILED ====="
+          exit 1
+        fi
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: generate-version
+spec:
+  params:
+    - name: commit-sha
+      type: string
+    - name: prefix
+      type: string
+      default: "v0.1"
+  results:
+    - name: version
+      description: The generated semantic version string
+  steps:
+    - name: version
+      image: alpine:3
+      script: |
+        SHORT_SHA=$(echo "$(params.commit-sha)" | cut -c1-7)
+        VERSION="$(params.prefix).0-${SHORT_SHA}"
+        echo "Generated version: $VERSION"
+        echo -n "$VERSION" > $(results.version.path)
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-report
+spec:
+  params:
+    - name: commit-sha
+      type: string
+    - name: version
+      type: string
+    - name: test-status
+      type: string
+    - name: repo-url
+      type: string
+  steps:
+    - name: report
+      image: alpine:3
+      script: |
+        echo "╔═══════════════════════════════════════╗"
+        echo "║          BUILD REPORT                 ║"
+        echo "╠═══════════════════════════════════════╣"
+        echo "║ Repo:    $(params.repo-url)"
+        echo "║ Commit:  $(params.commit-sha)"
+        echo "║ Version: $(params.version)"
+        echo "║ Tests:   $(params.test-status)"
+        echo "║ Time:    $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "╚═══════════════════════════════════════╝"
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: build-pipeline
+spec:
+  params:
+    - name: repo-url
+      type: string
+      description: Git repository URL to clone
+    - name: revision
+      type: string
+      description: Branch, tag, or SHA
+      default: main
+  workspaces:
+    - name: source-code
+
+  tasks:
+    # Stage 1: Clone and version generation run in PARALLEL
+    - name: clone
+      taskRef:
+        name: git-clone-simple
+      params:
+        - name: url
+          value: "$(params.repo-url)"
+        - name: revision
+          value: "$(params.revision)"
+      workspaces:
+        - name: output
+          workspace: source-code
+
+    # This runs in parallel with clone (no runAfter dependency)
+    - name: version
+      taskRef:
+        name: generate-version
+      params:
+        - name: commit-sha
+          value: "$(tasks.clone.results.commit-sha)"
+
+    # Stage 2: Test (depends on clone)
+    - name: test
+      runAfter:
+        - clone
+      taskRef:
+        name: run-tests
+      workspaces:
+        - name: source
+          workspace: source-code
+
+    # Stage 3: Report (depends on all previous tasks)
+    - name: report
+      runAfter:
+        - test
+        - version
+      taskRef:
+        name: build-report
+      params:
+        - name: commit-sha
+          value: "$(tasks.clone.results.commit-sha)"
+        - name: version
+          value: "$(tasks.version.results.version)"
+        - name: test-status
+          value: "$(tasks.test.results.status)"
+        - name: repo-url
+          value: "$(params.repo-url)"

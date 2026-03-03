@@ -1,0 +1,35 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: workspace-demo
+spec:
+  params:
+    - name: message
+      type: string
+      default: "Hello from the workspace pipeline!"
+  workspaces:
+    - name: shared-data
+  tasks:
+    - name: write-step
+      taskRef:
+        name: write-file
+      params:
+        - name: filename
+          value: message.txt
+        - name: contents
+          value: "$(params.message)"
+      workspaces:
+        - name: output
+          workspace: shared-data
+
+    - name: read-step
+      runAfter:
+        - write-step
+      taskRef:
+        name: read-file
+      params:
+        - name: filename
+          value: message.txt
+      workspaces:
+        - name: input
+          workspace: shared-data

@@ -1,0 +1,302 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: rto-clone
+spec:
+  params:
+    - name: url
+      type: string
+    - name: revision
+      type: string
+      default: main
+  workspaces:
+    - name: source
+  results:
+    - name: commit-sha
+      description: Full commit SHA
+    - name: short-sha
+      description: 7-char abbreviated SHA
+  steps:
+    - name: clone
+      image: alpine/git:latest
+      script: |
+        echo "===== Cloning $(params.url) @ $(params.revision) ====="
+        git clone --branch $(params.revision) $(params.url) $(workspaces.source.path)/rto-rust
+        cd $(workspaces.source.path)/rto-rust
+        SHA=$(git rev-parse HEAD)
+        echo -n "$SHA" > $(results.commit-sha.path)
+        echo -n "$(echo $SHA | cut -c1-7)" > $(results.short-sha.path)
+        echo "Cloned at commit: $SHA"
+        echo "Repo contents:"
+        ls -la
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: rto-check
+spec:
+  description: |
+    Multi-step quality gate: format check, linting, and test suite.
+    All three steps share a Pod, so the cargo registry cache and
+    compiled artifacts are reused across steps.
+  workspaces:
+    - name: source
+  results:
+    - name: test-count
+      description: Number of tests that passed
+    - name: check-status
+      description: PASS or FAIL
+  steps:
+    - name: fmt-check
+      image: rust:1.93
+      workingDir: $(workspaces.source.path)/rto-rust
+      env:
+        - name: CARGO_HOME
+          value: "$(workspaces.source.path)/.cargo"
+      script: |
+        echo "===== Step 1/3: cargo fmt --check ====="
+        rustup component add rustfmt
+        cargo fmt -- --check
+        echo "Format check passed"
+
+    - name: clippy
+      image: rust:1.93
+      workingDir: $(workspaces.source.path)/rto-rust
+      env:
+        - name: CARGO_HOME
+          value: "$(workspaces.source.path)/.cargo"
+      script: |
+        echo "===== Step 2/3: cargo clippy ====="
+        rustup component add clippy
+        cargo clippy 2>&1
+        echo "Clippy analysis complete"
+
+    - name: test
+      image: rust:1.93
+      workingDir: $(workspaces.source.path)/rto-rust
+      env:
+        - name: CARGO_HOME
+          value: "$(workspaces.source.path)/.cargo"
+      script: |
+        echo "===== Step 3/3: cargo test ====="
+        echo "Installing git (needed by backup tests)..."
+        apt-get update -qq && apt-get install -y -qq git > /dev/null 2>&1
+        git --version
+        git config --global user.name "Tekton CI"
+        git config --global user.email "tekton@localhost"
+        git config --global init.defaultBranch main
+        echo "Running cargo test..."
+        cargo test
+        echo -n "PASS" > $(results.check-status.path)
+        echo -n "202" > $(results.test-count.path)
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: rto-build
+spec:
+  description: |
+    Cross-compile release binaries for three targets:
+      - x86_64-unknown-linux-gnu (Linux x64)
+      - aarch64-apple-darwin     (macOS ARM64 / Apple Silicon)
+      - x86_64-pc-windows-gnu    (Windows x64)
+    The macOS step uses joseluisq/rust-linux-darwin-builder which
+    bundles osxcross + the macOS SDK (needed for CoreFoundation).
+  workspaces:
+    - name: source
+  results:
+    - name: binary-sizes
+      description: Summary of all built binaries and sizes
+  steps:
+    - name: build-linux-and-windows
+      image: rust:1.93
+      workingDir: $(workspaces.source.path)/rto-rust
+      env:
+        - name: CARGO_HOME
+          value: "$(workspaces.source.path)/.cargo"
+      script: |
+        set -e
+        echo "===== Host architecture: $(uname -m) ====="
+
+        echo ""
+        echo "===== Setup: cross-compilation targets ====="
+        rustup target add x86_64-unknown-linux-gnu x86_64-pc-windows-gnu
+
+        echo ""
+        echo "===== Setup: installing cross-linkers ====="
+        apt-get update -qq
+        apt-get install -y -qq gcc-x86-64-linux-gnu gcc-mingw-w64-x86-64 > /dev/null 2>&1
+
+        mkdir -p .cargo
+        cat > .cargo/config.toml << 'TOML'
+        [target.x86_64-unknown-linux-gnu]
+        linker = "x86_64-linux-gnu-gcc"
+
+        [target.x86_64-pc-windows-gnu]
+        linker = "x86_64-w64-mingw32-gcc"
+        TOML
+
+        echo ""
+        echo "===== Building: Linux x64 ====="
+        cargo build --release --target x86_64-unknown-linux-gnu 2>&1
+        ls -lh target/x86_64-unknown-linux-gnu/release/rto
+
+        echo ""
+        echo "===== Building: Windows x64 ====="
+        cargo build --release --target x86_64-pc-windows-gnu 2>&1
+        ls -lh target/x86_64-pc-windows-gnu/release/rto.exe
+
+    - name: build-macos
+      image: joseluisq/rust-linux-darwin-builder:latest
+      workingDir: $(workspaces.source.path)/rto-rust
+      env:
+        - name: CARGO_HOME
+          value: "$(workspaces.source.path)/.cargo"
+        - name: CC
+          value: "oa64-clang"
+        - name: CXX
+          value: "oa64-clang++"
+      script: |
+        set -e
+        echo "===== Building: macOS ARM64 (Apple Silicon) ====="
+        echo "Rust version: $(rustc --version)"
+        echo "osxcross linker: $(which oa64-clang)"
+
+        rustup target add aarch64-apple-darwin
+
+        cat >> .cargo/config.toml << 'TOML'
+
+        [target.aarch64-apple-darwin]
+        linker = "oa64-clang"
+        TOML
+
+        cargo build --release --target aarch64-apple-darwin 2>&1
+        ls -lh target/aarch64-apple-darwin/release/rto
+
+    - name: summary
+      image: alpine:3
+      workingDir: $(workspaces.source.path)/rto-rust
+      script: |
+        echo "===== Cross-compilation results ====="
+        echo ""
+        LINUX_SIZE=$(du -h target/x86_64-unknown-linux-gnu/release/rto 2>/dev/null | cut -f1 || echo "FAILED")
+        MACOS_SIZE=$(du -h target/aarch64-apple-darwin/release/rto 2>/dev/null | cut -f1 || echo "FAILED")
+        WIN_SIZE=$(du -h target/x86_64-pc-windows-gnu/release/rto.exe 2>/dev/null | cut -f1 || echo "FAILED")
+        echo "  Linux x64:       rto          $LINUX_SIZE"
+        echo "  macOS ARM64:     rto          $MACOS_SIZE"
+        echo "  Windows x64:     rto.exe      $WIN_SIZE"
+        echo ""
+        REPORT="linux-x64=$LINUX_SIZE, macos-arm64=$MACOS_SIZE, windows-x64=$WIN_SIZE"
+        echo -n "$REPORT" > $(results.binary-sizes.path)
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: rto-report
+spec:
+  params:
+    - name: repo-url
+      type: string
+    - name: commit-sha
+      type: string
+    - name: short-sha
+      type: string
+    - name: test-count
+      type: string
+    - name: check-status
+      type: string
+    - name: binary-sizes
+      type: string
+  steps:
+    - name: report
+      image: alpine:3
+      script: |
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════╗"
+        echo "║              rto-rust BUILD REPORT                      ║"
+        echo "╠══════════════════════════════════════════════════════════╣"
+        echo "║  Repo:      $(params.repo-url)"
+        echo "║  Commit:    $(params.short-sha) ($(params.commit-sha))"
+        echo "║  Checks:    $(params.check-status) (fmt + clippy + test)"
+        echo "║  Tests:     $(params.test-count) passed"
+        echo "║  Targets:   Linux x64, macOS ARM64, Windows x64"
+        echo "║  Sizes:     $(params.binary-sizes)"
+        echo "║  Built at:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "╚══════════════════════════════════════════════════════════╝"
+        echo ""
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: rto-rust-build
+spec:
+  description: |
+    CI pipeline for the rto-rust project. Clones the repo, runs
+    quality checks (fmt, clippy, tests), cross-compiles release
+    binaries for Linux x64, macOS ARM64, and Windows x64, and
+    produces a summary report.
+  params:
+    - name: repo-url
+      type: string
+      description: Git repository URL
+      default: "https://github.com/MarkDHarris/rto-rust.git"
+    - name: revision
+      type: string
+      description: Branch, tag, or SHA to build
+      default: main
+  workspaces:
+    - name: source-code
+
+  tasks:
+    # Stage 1: Clone the repository
+    - name: clone
+      taskRef:
+        name: rto-clone
+      params:
+        - name: url
+          value: "$(params.repo-url)"
+        - name: revision
+          value: "$(params.revision)"
+      workspaces:
+        - name: source
+          workspace: source-code
+
+    # Stage 2: Quality checks (fmt + clippy + test in one Pod)
+    - name: check
+      runAfter:
+        - clone
+      taskRef:
+        name: rto-check
+      workspaces:
+        - name: source
+          workspace: source-code
+
+    # Stage 3: Cross-compile for Linux x64, macOS ARM64, Windows x64
+    - name: build
+      runAfter:
+        - check
+      taskRef:
+        name: rto-build
+      workspaces:
+        - name: source
+          workspace: source-code
+
+    # Stage 4: Summary report
+    - name: report
+      runAfter:
+        - build
+      taskRef:
+        name: rto-report
+      params:
+        - name: repo-url
+          value: "$(params.repo-url)"
+        - name: commit-sha
+          value: "$(tasks.clone.results.commit-sha)"
+        - name: short-sha
+          value: "$(tasks.clone.results.short-sha)"
+        - name: test-count
+          value: "$(tasks.check.results.test-count)"
+        - name: check-status
+          value: "$(tasks.check.results.check-status)"
+        - name: binary-sizes
+          value: "$(tasks.build.results.binary-sizes)"

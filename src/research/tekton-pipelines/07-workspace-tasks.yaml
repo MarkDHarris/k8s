@@ -1,0 +1,46 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: write-file
+spec:
+  params:
+    - name: filename
+      type: string
+    - name: contents
+      type: string
+  workspaces:
+    - name: output
+  steps:
+    - name: write
+      image: alpine:3
+      script: |
+        echo "$(params.contents)" > $(workspaces.output.path)/$(params.filename)
+        echo "Wrote $(params.filename):"
+        cat $(workspaces.output.path)/$(params.filename)
+        echo "---"
+        echo "Workspace contents:"
+        ls -la $(workspaces.output.path)/
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: read-file
+spec:
+  params:
+    - name: filename
+      type: string
+  workspaces:
+    - name: input
+  results:
+    - name: file-contents
+      description: Contents of the file that was read
+  steps:
+    - name: read
+      image: alpine:3
+      script: |
+        echo "Workspace contents:"
+        ls -la $(workspaces.input.path)/
+        echo "---"
+        CONTENTS=$(cat $(workspaces.input.path)/$(params.filename))
+        echo "Read $(params.filename): $CONTENTS"
+        echo -n "$CONTENTS" > $(results.file-contents.path)

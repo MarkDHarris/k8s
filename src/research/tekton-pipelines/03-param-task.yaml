@@ -1,0 +1,25 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: greeting
+spec:
+  params:
+    - name: person
+      type: string
+      description: Who to greet
+      default: World
+    - name: greeting
+      type: string
+      description: The greeting to use
+      default: Hello
+  steps:
+    - name: greet
+      image: alpine:3
+      script: |
+        echo "$(params.greeting), $(params.person)!"
+    - name: context
+      image: alpine:3
+      script: |
+        echo "This task had TWO steps."
+        echo "Each step is a separate container in the same Pod."
+        echo "Steps always run sequentially within a Task."

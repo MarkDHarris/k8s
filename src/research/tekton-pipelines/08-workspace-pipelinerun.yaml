@@ -1,0 +1,19 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: workspace-demo-run-
+spec:
+  pipelineRef:
+    name: workspace-demo
+  params:
+    - name: message
+      value: "Data flows through workspaces!"
+  workspaces:
+    - name: shared-data
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 100Mi

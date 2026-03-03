@@ -1,0 +1,33 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: generate-name
+spec:
+  results:
+    - name: animal
+      description: A randomly selected animal name
+  steps:
+    - name: pick-animal
+      image: alpine:3
+      script: |
+        ANIMALS="cat dog elephant penguin octopus"
+        PICK=$(echo $ANIMALS | tr ' ' '\n' | shuf -n 1)
+        echo "Picked: $PICK"
+        # Writing to the results path is how a Task exports data.
+        # Other Tasks in the Pipeline can reference this via:
+        #   $(tasks.generate-name.results.animal)
+        echo -n "$PICK" > $(results.animal.path)
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: display-result
+spec:
+  params:
+    - name: message
+      type: string
+  steps:
+    - name: show
+      image: alpine:3
+      script: |
+        echo "Received from previous task: $(params.message)"

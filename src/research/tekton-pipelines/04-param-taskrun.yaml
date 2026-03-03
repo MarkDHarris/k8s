@@ -1,0 +1,12 @@
+apiVersion: tekton.dev/v1
+kind: TaskRun
+metadata:
+  name: greeting-run
+spec:
+  taskRef:
+    name: greeting
+  params:
+    - name: person
+      value: Tekton Developer
+    - name: greeting
+      value: Welcome

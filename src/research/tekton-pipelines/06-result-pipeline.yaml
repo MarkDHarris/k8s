@@ -1,0 +1,18 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: result-chain
+spec:
+  tasks:
+    - name: generate
+      taskRef:
+        name: generate-name
+
+    - name: display
+      runAfter:
+        - generate
+      taskRef:
+        name: display-result
+      params:
+        - name: message
+          value: "The animal is: $(tasks.generate.results.animal)"

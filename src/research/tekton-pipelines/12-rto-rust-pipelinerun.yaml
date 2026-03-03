@@ -1,0 +1,21 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: rto-rust-build-run-
+spec:
+  pipelineRef:
+    name: rto-rust-build
+  params:
+    - name: repo-url
+      value: "https://github.com/MarkDHarris/rto-rust.git"
+    - name: revision
+      value: main
+  workspaces:
+    - name: source-code
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 5Gi

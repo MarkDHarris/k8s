@@ -6,7 +6,7 @@ A hands-on walkthrough of Kubernetes Role-Based Access Control (RBAC), organized
 
 ## Prerequisites
 
-- A running Kubernetes cluster (use the [terraform/](../terraform/) folder or `kind create cluster`)
+- A running Kubernetes cluster (use the [terraform/](../../terraform/) folder or `kind create cluster`)
 - `kubectl` configured to talk to the cluster
 - `openssl` (for the human-path certificate exercises)
 

@@ -1,0 +1,21 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: build-pipeline-run-
+spec:
+  pipelineRef:
+    name: build-pipeline
+  params:
+    - name: repo-url
+      value: "https://github.com/tektoncd/pipeline.git"
+    - name: revision
+      value: main
+  workspaces:
+    - name: source-code
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 500Mi
