@@ -1,0 +1,8 @@
+{
+  "yaml.schemas": {
+    ".vscode/kind-config-schema.json": [
+      "**/kind-cluster/cluster.yaml",
+      "**/kind-cluster/cluster.yml"
+    ]
+  }
+}

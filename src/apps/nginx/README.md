@@ -2,13 +2,15 @@
 
 Deploys an NGINX web server with full Ingress routing into an **existing** Kind cluster using raw Kubernetes YAML and `kubectl`. This is the **kubectl equivalent** of the Terraform approach in [`../../terraform/app_demo/`](../../terraform/app_demo/) -- both deploy identical application resources into the same cluster.
 
-> **Prerequisite:** A Kind cluster must already be running. Create one with:
+> **Prerequisite:** A Kind cluster must already be running. Create one using either approach:
 >
 > ```bash
+> # Option 1: Terraform (infrastructure-as-code with state tracking)
 > cd ../../terraform/cluster && terraform init && terraform apply
-> ```
 >
-> Or use the Kind CLI directly: `kind create cluster --name dev`
+> # Option 2: Kind CLI (direct, fast, no state tracking)
+> cd ../../kind-cluster && kind create cluster --config cluster.yaml --name dev
+> ```
 
 ---
 

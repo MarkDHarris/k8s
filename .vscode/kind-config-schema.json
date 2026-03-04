@@ -1,0 +1,185 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Kind Cluster Configuration",
+  "description": "Schema for kind (Kubernetes IN Docker) cluster configuration v1alpha4",
+  "type": "object",
+  "required": ["kind", "apiVersion"],
+  "additionalProperties": false,
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": ["Cluster"],
+      "description": "Must be 'Cluster'"
+    },
+    "apiVersion": {
+      "type": "string",
+      "enum": ["kind.x-k8s.io/v1alpha4"],
+      "description": "API version for kind config"
+    },
+    "name": {
+      "type": "string",
+      "description": "Cluster name (overridden by --name flag)"
+    },
+    "featureGates": {
+      "type": "object",
+      "description": "Kubernetes feature gates to enable/disable",
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    },
+    "runtimeConfig": {
+      "type": "object",
+      "description": "Kubernetes runtime config flags to pass to API server",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "networking": {
+      "type": "object",
+      "description": "Cluster networking configuration",
+      "additionalProperties": false,
+      "properties": {
+        "ipFamily": {
+          "type": "string",
+          "enum": ["ipv4", "ipv6", "dual"],
+          "description": "IP family for the cluster (ipv4, ipv6, or dual)"
+        },
+        "apiServerAddress": {
+          "type": "string",
+          "description": "IP address to bind the API server to"
+        },
+        "apiServerPort": {
+          "type": "integer",
+          "description": "Port to bind the API server to"
+        },
+        "podSubnet": {
+          "type": "string",
+          "description": "CIDR for pod IPs"
+        },
+        "serviceSubnet": {
+          "type": "string",
+          "description": "CIDR for service IPs"
+        },
+        "disableDefaultCNI": {
+          "type": "boolean",
+          "description": "Disable the default kindnet CNI"
+        },
+        "kubeProxyMode": {
+          "type": "string",
+          "enum": ["iptables", "ipvs", "nftables", "none"],
+          "description": "Kube-proxy mode (iptables, ipvs, nftables, or none)"
+        },
+        "dnsSearch": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "DNS search domains"
+        }
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "description": "List of nodes to create in the cluster",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": ["control-plane", "worker"],
+            "description": "Node role"
+          },
+          "image": {
+            "type": "string",
+            "description": "Container image to use for this node (e.g. kindest/node:v1.29.0)"
+          },
+          "labels": {
+            "type": "object",
+            "description": "Labels to apply to the node",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "kubeadmConfigPatches": {
+            "type": "array",
+            "description": "Kubeadm config patches for this node",
+            "items": {
+              "type": "string"
+            }
+          },
+          "extraMounts": {
+            "type": "array",
+            "description": "Extra volume mounts for the node container",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "hostPath": {
+                  "type": "string",
+                  "description": "Path on the host"
+                },
+                "containerPath": {
+                  "type": "string",
+                  "description": "Path inside the node container"
+                },
+                "readOnly": {
+                  "type": "boolean",
+                  "description": "Mount as read-only"
+                },
+                "selinuxRelabel": {
+                  "type": "boolean",
+                  "description": "Relabel the mount for SELinux"
+                },
+                "propagation": {
+                  "type": "string",
+                  "enum": ["None", "HostToContainer", "Bidirectional"],
+                  "description": "Mount propagation mode"
+                }
+              }
+            }
+          },
+          "extraPortMappings": {
+            "type": "array",
+            "description": "Port mappings from host to node container",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "containerPort": {
+                  "type": "integer",
+                  "description": "Port inside the container"
+                },
+                "hostPort": {
+                  "type": "integer",
+                  "description": "Port on the host"
+                },
+                "listenAddress": {
+                  "type": "string",
+                  "description": "Address to bind on the host"
+                },
+                "protocol": {
+                  "type": "string",
+                  "enum": ["TCP", "UDP", "SCTP"],
+                  "description": "Protocol (TCP, UDP, or SCTP)"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "containerdConfigPatches": {
+      "type": "array",
+      "description": "Containerd config patches (TOML format)",
+      "items": {
+        "type": "string"
+      }
+    },
+    "containerdConfigPatchesJSON6902": {
+      "type": "array",
+      "description": "Containerd config patches in JSON 6902 format",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

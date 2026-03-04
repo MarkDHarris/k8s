@@ -18,6 +18,7 @@ The project is split into two independent Terraform root modules to teach proper
 - [What Gets Created](#what-gets-created)
 - [Kind Provider Feature Coverage](#kind-provider-feature-coverage)
 - [Prerequisites](#prerequisites)
+- [VS Code / Cursor IDE Setup](#vs-code--cursor-ide-setup)
 - [Quick Start](#quick-start)
 - [Project Structure](#project-structure)
 - [File-by-File Walkthrough](#file-by-file-walkthrough)
@@ -233,6 +234,48 @@ docker version      # Should show Docker Engine running
 kind version        # Should show >= 0.20.0
 kubectl version     # Client version >= 1.28
 ```
+
+---
+
+## VS Code / Cursor IDE Setup
+
+The Terraform language server validates `.tf` files using **provider schemas** -- the detailed type information describing every resource, block, and attribute that each provider supports. These schemas are downloaded during `terraform init` and stored in the `.terraform/` directory. Without them, the language server doesn't know what blocks are valid for provider-specific resources and produces false errors.
+
+### Common False Errors
+
+If you open this project before running `terraform init` in both `cluster/` and `app_demo/`, you'll see errors like:
+
+| File | False Error | Cause |
+|------|-------------|-------|
+| `app_demo/main.tf` | `Unexpected block: blocks of type "set" are not expected here` | Missing Helm provider schema (`set` is valid on `helm_release`) |
+| `cluster/main.tf` | Unknown resource types, missing attributes | Missing Kind provider schema |
+
+These are **not code errors** -- the Terraform is valid. The IDE just can't validate without the schemas.
+
+### Fix: Initialize Both Modules
+
+Run `terraform init` in **each** root module directory. This downloads providers and generates the schemas the language server needs:
+
+```bash
+cd cluster/
+terraform init
+
+cd ../app_demo/
+terraform init
+```
+
+After initialization, reload the editor window (`Cmd+Shift+P` > `Developer: Reload Window`) if errors persist. The language server will find the schemas in `.terraform/providers/` and validate correctly, including autocomplete and hover documentation for all provider resources.
+
+### Why Two Separate Inits?
+
+Each root module (`cluster/` and `app_demo/`) has **its own** `.terraform/` directory, lock file, and state file. They use different providers:
+
+| Module | Providers | Schema Coverage |
+|--------|-----------|-----------------|
+| `cluster/` | `tehcyx/kind` | `kind_cluster`, `kind_config` blocks |
+| `app_demo/` | `hashicorp/helm`, `hashicorp/kubernetes` | `helm_release` + `set` blocks, `kubernetes_deployment_v1`, etc. |
+
+Initializing one does not cover the other. Both must be initialized independently.
 
 ---
 
@@ -822,6 +865,7 @@ kubeconfig_context = "kind-staging"
 | Nodes stuck in `NotReady` | Wait 1-2 minutes, or check: `kubectl describe node <name>` |
 | Terraform state out of sync | `terraform refresh` or `kind delete cluster && terraform apply` |
 | `Error: provider not found` | Run `terraform init` in the correct subdirectory |
+| IDE shows `blocks of type "set" are not expected here` | Run `terraform init` in the module directory -- the language server needs provider schemas (see [IDE Setup](#vs-code--cursor-ide-setup)) |
 | Slow cluster creation | Ensure Docker has enough resources (4GB+ RAM recommended) |
 | `Error: context not found` | Check that `kubeconfig_context` in `app_demo/terraform.tfvars` matches the Kind cluster name |
 | App deploy fails after cluster recreate | Run `cd app_demo && terraform init` to refresh provider cache |

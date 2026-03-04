@@ -1,0 +1,212 @@
+# =============================================================================
+# Kind Cluster Configuration -- CLI Approach
+# =============================================================================
+# This file creates the same cluster as ../terraform/cluster/ but using the
+# Kind CLI directly instead of Terraform.
+#
+# USAGE:
+#   kind create cluster --config cluster.yaml --name dev
+#
+# TERRAFORM EQUIVALENT:
+#   cd ../terraform/cluster && terraform init && terraform apply
+#
+# Both approaches produce an identical cluster: same nodes, same networking,
+# same labels, same taints, same port mappings. The difference is in how you
+# manage it (see README.md for a full comparison).
+#
+# DEFAULT TOPOLOGY (matches terraform defaults):
+#   - 2 control-plane nodes (HA with replicated etcd)
+#   - 2 worker nodes (1 general-purpose with storage, 1 GPU-tainted)
+#   - Custom pod and service CIDRs
+#   - Port mappings for ingress traffic (80/443)
+#
+# To change the number of nodes, duplicate or remove node entries below.
+# Unlike the Terraform approach (which uses count variables), the Kind CLI
+# config requires you to explicitly list each node.
+# =============================================================================
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+
+
+# =============================================================================
+# Networking
+# =============================================================================
+# Custom pod and service CIDRs. These override Kind's defaults
+# (10.244.0.0/16 and 10.96.0.0/12).
+#
+# TERRAFORM EQUIVALENT:
+#   networking = {
+#     api_server_port = 6443
+#     pod_subnet      = "10.200.0.0/16"
+#     service_subnet  = "10.100.0.0/16"
+#     kube_proxy_mode = "iptables"
+#   }
+#
+# ALL NETWORKING OPTIONS:
+#   apiServerAddress  - IP the API server binds to (default: "127.0.0.1")
+#   apiServerPort     - API server port (default: random)
+#   podSubnet         - CIDR for Pod IPs
+#   serviceSubnet     - CIDR for Service ClusterIPs
+#   disableDefaultCNI - Set to true to install your own CNI (Calico, Cilium)
+#   kubeProxyMode     - "iptables" (default), "ipvs", or "nftables"
+#   ipFamily          - "ipv4" (default), "ipv6", or "dual"
+#   dnsSearch         - Custom DNS search domains (list of strings)
+networking:
+  apiServerPort: 6443
+  podSubnet: "10.200.0.0/16"
+  serviceSubnet: "10.100.0.0/16"
+  kubeProxyMode: "iptables"
+
+  # Uncomment to test dual-stack networking:
+  # ipFamily: "dual"
+
+  # Uncomment to add custom DNS search domains:
+  # dnsSearch:
+  #   - "corp.example.com"
+  #   - "internal.local"
+
+  # Uncomment to disable the default CNI (kindnet) and install your own:
+  # disableDefaultCNI: true
+
+
+# =============================================================================
+# Containerd Config Patches
+# =============================================================================
+# Raw TOML patches applied to containerd on every node.
+#
+# IMPORTANT: kindest/node v1.34+ ships containerd v2.x which REMOVED the
+# registry.mirrors section. Use the hosts directory approach instead:
+#   [plugins."io.containerd.grpc.v1.cri".registry]
+#     config_path = "/etc/containerd/certs.d"
+# Then mount host-side config files using extraMounts.
+# See: https://kind.sigs.k8s.io/docs/user/local-registry/
+#
+# containerdConfigPatches:
+#   - |-
+#     [plugins."io.containerd.grpc.v1.cri".registry]
+#       config_path = "/etc/containerd/certs.d"
+
+
+# =============================================================================
+# Feature Gates and Runtime Config
+# =============================================================================
+# Uncomment to enable Kubernetes feature gates or runtime config overrides.
+#
+# featureGates:
+#   GracefulNodeShutdown: true
+#
+# runtimeConfig:
+#   "api/alpha": "true"
+
+
+# =============================================================================
+# Nodes
+# =============================================================================
+# Each entry creates a Docker container acting as a Kubernetes node.
+# To add more nodes, duplicate entries. To remove nodes, delete entries.
+#
+# KIND CONFIG OPTIONS PER NODE:
+#   role                 - "control-plane" or "worker"
+#   image                - Per-node image override (e.g., "kindest/node:v1.30.0")
+#   labels               - Map of Kubernetes node labels
+#   kubeadmConfigPatches - YAML patches for kubeadm Init/JoinConfiguration
+#   extraMounts          - Host-to-container bind mounts
+#   extraPortMappings    - Host-to-container port forwards
+
+nodes:
+
+  # ===========================================================================
+  # Control Plane #1: Ingress-Ready Leader
+  # ===========================================================================
+  # The first control-plane runs the etcd leader and initializes the cluster.
+  # Configured for ingress with:
+  #   1. "ingress-ready=true" label (required by NGINX Ingress Controller)
+  #   2. Port mappings 80/443 (ingress traffic from localhost)
+  #
+  # TERRAFORM EQUIVALENT:
+  #   The cp_leader local in cluster/main.tf
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    labels:
+      node-role.example.com/ingress: "true"
+      cluster-role: primary-control-plane
+    extraPortMappings:
+      - containerPort: 80        # HTTP
+        hostPort: 80
+        listenAddress: "0.0.0.0"
+        protocol: TCP
+      - containerPort: 443       # HTTPS
+        hostPort: 443
+        listenAddress: "0.0.0.0"
+        protocol: TCP
+
+  # ===========================================================================
+  # Control Plane #2: HA Secondary
+  # ===========================================================================
+  # Creates High Availability: replicated etcd, load-balanced API server.
+  # The cluster survives the failure of one control-plane node.
+  #
+  # To add a third control-plane for production-like HA (etcd quorum
+  # tolerates 1 failure), duplicate this entry.
+  #
+  # TERRAFORM EQUIVALENT:
+  #   The cp_secondary local in cluster/main.tf (generated by control_plane_count)
+  - role: control-plane
+    labels:
+      cluster-role: secondary-control-plane
+
+  # ===========================================================================
+  # Worker #1: General-Purpose with Persistent Storage
+  # ===========================================================================
+  # Demonstrates extraMounts with all supported attributes.
+  # Data written to /var/local-data persists across pod restarts
+  # (but not across cluster recreation).
+  #
+  # EXTRA MOUNT OPTIONS:
+  #   hostPath       - Path on the Docker host
+  #   containerPath  - Path inside the node container
+  #   readOnly       - Write protection (default: false)
+  #   propagation    - Mount propagation: "None", "HostToContainer", "Bidirectional"
+  #   selinuxRelabel - Relabel for SELinux (default: false, only for RHEL/Fedora)
+  #
+  # TERRAFORM EQUIVALENT:
+  #   The worker_with_storage local in cluster/main.tf
+  - role: worker
+    labels:
+      workload-type: general
+      has-storage: "true"
+    extraMounts:
+      - hostPath: /tmp
+        containerPath: /var/local-data
+        readOnly: false
+        propagation: None
+        selinuxRelabel: false
+
+  # ===========================================================================
+  # Worker #2: GPU-Tainted Specialized Node
+  # ===========================================================================
+  # Tainted so only pods with a matching toleration are scheduled here.
+  # Simulates a dedicated GPU/spot/ARM node pool.
+  #
+  # The taint "dedicated=gpu:NoSchedule" means:
+  #   - Regular pods are NOT scheduled on this node
+  #   - Only pods with a matching toleration can run here
+  #
+  # TERRAFORM EQUIVALENT:
+  #   The worker_gpu local in cluster/main.tf
+  - role: worker
+    labels:
+      workload-type: gpu
+      hardware-acceleration: "true"
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            register-with-taints: "dedicated=gpu:NoSchedule"
