@@ -1,18 +1,29 @@
 # Kind Kubernetes Cluster -- Terraform Project
 
-A comprehensive Terraform project that provisions a fully-featured, multi-node Kubernetes cluster on your local machine using [Kind](https://kind.sigs.k8s.io/) (Kubernetes IN Docker). This project demonstrates **every feature** of the [tehcyx/kind Terraform provider](https://registry.terraform.io/providers/tehcyx/kind/latest) and serves as both a working development environment and an educational reference for learning Terraform with Kubernetes.
+A comprehensive Terraform project that provisions a fully-featured, multi-node Kubernetes cluster on your local machine using [Kind](https://kind.sigs.k8s.io/) (Kubernetes IN Docker), then optionally deploys a demo NGINX application with ingress routing. This project demonstrates **every feature** of the [tehcyx/kind Terraform provider](https://registry.terraform.io/providers/tehcyx/kind/latest) and serves as both a working development environment and an educational reference for learning Terraform with Kubernetes.
+
+The project is split into two independent Terraform root modules to teach proper infrastructure separation:
+
+| Module | Purpose |
+|--------|---------|
+| **`cluster/`** | Provisions a pure, fully-featured Kind cluster (infrastructure) |
+| **`app_demo/`** | Deploys a demo NGINX app with ingress into the cluster (workload) |
 
 ---
 
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
+- [Two-Module Design](#two-module-design)
 - [What Gets Created](#what-gets-created)
 - [Kind Provider Feature Coverage](#kind-provider-feature-coverage)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [Project Structure](#project-structure)
 - [File-by-File Walkthrough](#file-by-file-walkthrough)
+  - [cluster/ Files](#cluster-files)
+  - [app_demo/ Files](#app_demo-files)
+  - [Shared Module: modules/kind-cluster/](#shared-module-moduleskind-cluster)
 - [Configuration Reference](#configuration-reference)
 - [Learning Exercises](#learning-exercises)
 - [Modification Guide](#modification-guide)
@@ -46,46 +57,98 @@ A comprehensive Terraform project that provisions a fully-featured, multi-node K
 │  │ Network: pod_subnet=10.200.0.0/16, service_subnet=10.100.0.0/16 │  │
 │  └─────────────────────────────────────────────────────────────────┘  │
 │                                                                       │
-│  localhost:80  ──→ NGINX Ingress ──→ Your Services                    │
-│  localhost:443 ──→ NGINX Ingress ──→ Your Services                    │
+│  ── Created by cluster/ ──────────────────────────────────────────    │
+│                                                                       │
+│  localhost:80  ──→ NGINX Ingress ──→ Demo NGINX App                   │
+│  localhost:443 ──→ NGINX Ingress ──→ Demo NGINX App                   │
+│                                                                       │
+│  ── Created by app_demo/ ─────────────────────────────────────────    │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
+---
+
+## Two-Module Design
+
+This project is intentionally split into **two independent Terraform root modules** rather than one monolithic configuration. This separation teaches an important Terraform best practice:
+
+### Why Separate?
+
+| Concern | Single Module (before) | Two Modules (now) |
+|---------|----------------------|-------------------|
+| **Blast radius** | Changing the app could accidentally destroy the cluster | Each module has its own state; changes are isolated |
+| **Lifecycle** | Cluster and app are created/destroyed together | Destroy the app without touching the cluster, or vice versa |
+| **Ownership** | One team owns everything | Platform team owns `cluster/`, app team owns `app_demo/` |
+| **State size** | Single large state file | Smaller, focused state files |
+| **Provider deps** | All three providers always needed | `cluster/` only needs Kind; `app_demo/` only needs Helm + Kubernetes |
+| **Reusability** | Hard to reuse the cluster for other apps | Deploy any app to the cluster -- not just this demo |
+
+### How They Connect
+
+```
+cluster/                          app_demo/
+┌──────────────────┐              ┌──────────────────┐
+│  terraform apply │              │  terraform apply │
+│                  │              │                  │
+│  Creates Kind    │──kubeconfig──│  Reads kubeconfig│
+│  cluster         │  (~/.kube/   │  to connect to   │
+│                  │   config)    │  the cluster     │
+└──────────────────┘              └──────────────────┘
+       ↓                                 ↓
+  Pure infrastructure              Application workload
+  (nodes, networking)              (Ingress, Deployment,
+                                    Service, Ingress)
+```
+
+The `cluster/` module creates the Kind cluster, which automatically updates `~/.kube/config`. The `app_demo/` module reads that kubeconfig to connect and deploy resources. No shared state or remote backends are needed.
+
+---
+
 ## What Gets Created
+
+### cluster/ (Infrastructure)
 
 | Component | Details |
 |-----------|---------|
 | **Control Plane Nodes** | 2 nodes (HA cluster with replicated etcd) |
 | **Worker Nodes** | 2 nodes (1 general-purpose, 1 tainted for GPU workloads) |
 | **Networking** | Custom Pod CIDR (10.200.0.0/16), Service CIDR (10.100.0.0/16), iptables proxy mode |
-| **Ingress** | NGINX Ingress Controller via Helm, accessible at localhost:80/443 |
-| **Container Runtime** | Containerd with registry mirror patches |
 | **Port Mappings** | Host ports 80/443 forwarded to control-plane node |
 | **Storage** | Host /tmp mounted into Worker #1 at /var/local-data |
 | **Labels** | Provider-native labels on all nodes for identification |
 | **Taints** | GPU taint on Worker #2 (dedicated=gpu:NoSchedule) |
 
+### app_demo/ (Application)
+
+| Component | Details |
+|-----------|---------|
+| **Ingress Controller** | NGINX Ingress Controller via Helm, accessible at localhost:80/443 |
+| **Demo Namespace** | Isolated `demo` namespace for the sample app |
+| **NGINX Deployment** | 2 replicas with liveness and readiness probes |
+| **ClusterIP Service** | Internal load balancing across NGINX replicas |
+| **Ingress Resource** | Routes `http://localhost/` to the NGINX service |
+
 ---
 
 ## Kind Provider Feature Coverage
 
-This project uses **every resource and every attribute** available in the tehcyx/kind Terraform provider (v0.7.0):
+The `cluster/` module uses **every resource and every attribute** available in the tehcyx/kind Terraform provider (v0.7.0):
 
 ### Resources
 
 | Resource | Status | Description |
 |----------|--------|-------------|
 | `kind_cluster` | Used | Creates the Kind cluster |
-| `kind_load` | Unreleased | Loads local Docker images into the cluster. Available in provider source code but NOT in any published release (as of v0.10.0). Documented with workarounds in `main.tf` Section 4. |
+| `kind_load` | Unreleased | Loads local Docker images into the cluster. Available in provider source code but NOT in any published release (as of v0.10.0). Documented with workarounds in `cluster/main.tf`. |
 
 ### kind_cluster Arguments
 
 | Argument | Used | Location |
 |----------|------|----------|
-| `name` | Yes | `modules/kind-cluster/main.tf` |
-| `node_image` | Yes | `modules/kind-cluster/main.tf` |
-| `wait_for_ready` | Yes | `modules/kind-cluster/main.tf` |
-| `kubeconfig_path` | Yes | `modules/kind-cluster/main.tf` |
+| `name` | Yes | `cluster/modules/kind-cluster/main.tf` |
+| `node_image` | Yes | `cluster/modules/kind-cluster/main.tf` |
+| `wait_for_ready` | Yes | `cluster/modules/kind-cluster/main.tf` |
+| `kubeconfig_path` | Yes | `cluster/modules/kind-cluster/main.tf` |
 
 ### kind_config Block
 
@@ -176,27 +239,42 @@ kubectl version     # Client version >= 1.28
 ## Quick Start
 
 ```bash
-# 1. Clone and navigate to the project
-cd /path/to/k8s/src/terraform
+# ──────────────────────────────────────────────────────────────
+# Step 1: Deploy the cluster
+# ──────────────────────────────────────────────────────────────
+cd cluster/
 
-# 2. Initialize Terraform (downloads providers)
-terraform init
+terraform init    # Download providers
+terraform plan    # Preview what will be created
+terraform apply   # Create the cluster (2-5 minutes)
 
-# 3. Preview what will be created
-terraform plan
+# Verify the cluster
+kubectl get nodes -o wide       # Should show 4 nodes
+kubectl get nodes --show-labels  # Check labels
 
-# 4. Create the cluster (takes 2-5 minutes)
-terraform apply
 
-# 5. Verify the cluster
-kubectl get nodes -o wide
-kubectl get pods -A
+# ──────────────────────────────────────────────────────────────
+# Step 2: Deploy the demo app
+# ──────────────────────────────────────────────────────────────
+cd ../app_demo/
 
-# 6. Test ingress (after NGINX pods are Running)
+terraform init    # Download providers
+terraform plan    # Preview the app resources
+terraform apply   # Deploy ingress + NGINX app
+
+# Test (wait ~30s for pods to become Ready)
+kubectl -n demo get pods
 curl http://localhost
 
-# 7. Clean up when done
-terraform destroy
+
+# ──────────────────────────────────────────────────────────────
+# Cleanup
+# ──────────────────────────────────────────────────────────────
+# Remove just the app:
+cd app_demo/ && terraform destroy
+
+# Remove the cluster:
+cd ../cluster/ && terraform destroy
 ```
 
 ---
@@ -205,81 +283,109 @@ terraform destroy
 
 ```
 terraform/
-├── main.tf                          # Root module: orchestrates everything
-│                                    #   - Calls kind-cluster module
-│                                    #   - Configures kubernetes/helm providers
-│                                    #   - Deploys NGINX Ingress via Helm
-│                                    #   - Loads Docker images via kind_load
-├── variables.tf                     # Root module: input variables
-│                                    #   - cluster_name, k8s_version
-│                                    #   - kubeconfig_path
-│                                    #   - load_docker_images
-├── outputs.tf                       # Root module: output values
-│                                    #   - Cluster endpoint, kubeconfig
-│                                    #   - Post-apply instructions
-├── versions.tf                      # Root module: provider version pins
-│                                    #   - tehcyx/kind, hashicorp/helm,
-│                                    #     hashicorp/kubernetes
-├── terraform.tfvars                 # Your custom variable overrides
-│                                    #   (edit this file to customize)
-├── README.md                        # This file
+├── README.md                            # This file (project overview)
 │
-├── modules/
-│   └── kind-cluster/                # Child module: Kind cluster creation
-│       ├── main.tf                  # The kind_cluster resource with ALL features
-│       ├── variables.tf             # Module inputs (the module's API)
-│       ├── outputs.tf               # Module outputs (connection details)
-│       └── versions.tf              # Module provider requirements
+├── cluster/                             # TERRAFORM ROOT MODULE #1: Infrastructure
+│   ├── main.tf                          # Calls the kind-cluster module with all
+│   │                                    #   Kind features configured (networking,
+│   │                                    #   nodes, labels, taints, mounts, ports)
+│   ├── variables.tf                     # cluster_name, k8s_version, kubeconfig_path
+│   ├── outputs.tf                       # Cluster endpoint, kubeconfig, context name,
+│   │                                    #   TLS certs, and post-apply instructions
+│   ├── versions.tf                      # tehcyx/kind provider only
+│   ├── terraform.tfvars                 # Your cluster customizations
+│   │
+│   └── modules/
+│       └── kind-cluster/                # Reusable child module
+│           ├── main.tf                  # kind_cluster resource with ALL features
+│           ├── variables.tf             # Module API (typed, validated inputs)
+│           ├── outputs.tf               # Connection credentials (sensitive)
+│           └── versions.tf              # Module provider contract
 │
-├── .terraform/                      # Auto-generated: downloaded providers
-├── .terraform.lock.hcl             # Provider version lock file (commit this)
-├── terraform.tfstate               # Cluster state (DO NOT commit)
-└── dev-cluster-config              # Generated kubeconfig (DO NOT commit)
+├── app_demo/                            # TERRAFORM ROOT MODULE #2: Application
+│   ├── main.tf                          # NGINX Ingress (Helm) + demo app
+│   │                                    #   (Deployment + Service + Ingress)
+│   ├── variables.tf                     # kubeconfig_path, kubeconfig_context
+│   ├── outputs.tf                       # nginx_url, post-deploy instructions
+│   ├── versions.tf                      # hashicorp/helm + hashicorp/kubernetes
+│   └── terraform.tfvars                 # Context name matching the cluster
+│
+├── .terraform/                          # Auto-generated (per root module)
+├── .terraform.lock.hcl                 # Provider lock (per root module, commit this)
+└── terraform.tfstate                   # State file (per root module, DO NOT commit)
 ```
+
+> **Note:** Each root module (`cluster/` and `app_demo/`) has its own `.terraform/` directory, lock file, and state file. Run `terraform init` separately in each.
 
 ---
 
 ## File-by-File Walkthrough
 
-### Root Module Files
+### cluster/ Files
 
-#### `versions.tf` -- Provider Dependencies
-Declares the three providers this project needs and pins their versions for reproducibility. The lock file (`.terraform.lock.hcl`) records exact binary hashes.
+#### `cluster/versions.tf` -- Provider Dependencies
+Declares only the Kind provider. This module doesn't need `hashicorp/kubernetes` or `hashicorp/helm` because it doesn't deploy any workloads -- the cluster is a pure infrastructure concern.
 
-#### `variables.tf` -- User Inputs
-Defines the knobs users can turn: cluster name, Kubernetes version, kubeconfig path, and Docker images to load. Each variable has extensive documentation explaining its purpose and valid values.
+#### `cluster/variables.tf` -- User Inputs
+Three variables: cluster name, Kubernetes version, and optional kubeconfig path. Each has extensive documentation explaining its purpose and valid values.
 
-#### `main.tf` -- The Orchestrator
-The heart of the project. It:
-1. **Calls the child module** with all configuration (networking, nodes, patches)
-2. **Configures providers** using the module's credential outputs
-3. **Deploys NGINX Ingress** via a Helm release
-4. **Documents the unreleased `kind_load` resource** with workarounds
+#### `cluster/main.tf` -- The Cluster Orchestrator
+The heart of cluster provisioning. It calls the `kind-cluster` child module with full configuration:
+- **Networking**: custom pod/service CIDRs, proxy mode, port forwarding
+- **Nodes**: 4 nodes (2 control-plane, 2 worker) with labels, taints, mounts
+- **Commented sections** for feature gates, runtime config, and containerd patches
 
-#### `outputs.tf` -- Results Display
-Shows the cluster endpoint and helpful post-apply instructions including kubectl commands for verification.
+#### `cluster/outputs.tf` -- Cluster Credentials & Instructions
+Exports connection details (endpoint, TLS certs, kubeconfig) for use by other tools or terraform modules. Includes the `cluster_context` output that `app_demo/` references.
 
-### Child Module Files (`modules/kind-cluster/`)
+#### `cluster/terraform.tfvars` -- Customization
+Override cluster name and Kubernetes version here.
 
-#### `variables.tf` -- The Module API
-Defines every possible configuration option as a typed variable. Uses Terraform's `optional()` function with defaults so callers only need to specify what they want to customize.
+---
 
-#### `main.tf` -- The Kind Cluster Resource
-Contains the `kind_cluster` resource with every supported attribute. Uses `dynamic` blocks to generate node configurations from a list variable. Extensively commented to explain each feature.
+### app_demo/ Files
 
-#### `outputs.tf` -- Credential Export
-Exposes the five computed attributes (endpoint, certificates, kubeconfig) needed by other providers to connect to the cluster. Sensitive values are marked to prevent accidental log exposure.
+#### `app_demo/versions.tf` -- Provider Dependencies
+Declares only `hashicorp/helm` and `hashicorp/kubernetes`. No Kind provider needed since the cluster is managed by the sibling module.
 
-#### `versions.tf` -- Module Provider Contract
-Declares the minimum Kind provider version needed. Uses `>=` (not exact pin) so the root module controls the exact version.
+#### `app_demo/variables.tf` -- Connection Config
+Two variables: kubeconfig path (defaults to `~/.kube/config`) and kubeconfig context (defaults to `kind-dev`). Changing the context lets you target a different cluster.
+
+#### `app_demo/main.tf` -- Application Deployment
+Deploys three layers:
+1. **NGINX Ingress Controller** via Helm -- processes Ingress resources and routes HTTP traffic
+2. **Demo NGINX app** -- Deployment (2 replicas), Service (ClusterIP), and Ingress
+3. **Provider config** -- connects to the cluster using kubeconfig context
+
+#### `app_demo/outputs.tf` -- Access Instructions
+Shows the URL to reach the demo app and cleanup commands.
+
+#### `app_demo/terraform.tfvars` -- Cluster Context
+Must match the `cluster_name` in `cluster/terraform.tfvars`. If you change the cluster name, update this too.
+
+---
+
+### Shared Module: modules/kind-cluster/
+
+The child module in `cluster/modules/kind-cluster/` is unchanged from the monolithic version. It encapsulates the `kind_cluster` resource with every provider feature:
+
+#### `modules/kind-cluster/variables.tf` -- The Module API
+Defines every possible configuration option as a typed variable. Uses Terraform's `optional()` function with defaults so callers only specify what they want to customize.
+
+#### `modules/kind-cluster/main.tf` -- The Kind Cluster Resource
+Contains the `kind_cluster` resource with every supported attribute. Uses `dynamic` blocks to generate node configurations from a list variable.
+
+#### `modules/kind-cluster/outputs.tf` -- Credential Export
+Exposes the five computed attributes (endpoint, certificates, kubeconfig) needed by providers to connect to the cluster. Sensitive values are marked to prevent accidental log exposure.
+
+#### `modules/kind-cluster/versions.tf` -- Module Provider Contract
+Declares the minimum Kind provider version needed (`>= 0.7.0`). Uses `>=` so the root module controls the exact version.
 
 ---
 
 ## Configuration Reference
 
-### terraform.tfvars
-
-Customize your cluster by editing `terraform.tfvars`:
+### cluster/terraform.tfvars
 
 ```hcl
 # Cluster name (becomes kubectl context "kind-my-project")
@@ -290,45 +396,57 @@ k8s_version = "kindest/node:v1.31.0"
 
 # Custom kubeconfig location (optional)
 # kubeconfig_path = "/Users/you/.kube/kind-my-project"
+```
 
-# Load local Docker images into the cluster (optional)
-# load_docker_images = ["myapp:latest", "sidecar:v2.0"]
+### app_demo/terraform.tfvars
+
+```hcl
+# Must match cluster_name in ../cluster/terraform.tfvars
+# Kind contexts are "kind-<cluster_name>"
+kubeconfig_context = "kind-my-project"
+
+# Custom kubeconfig path (optional, defaults to ~/.kube/config)
+# kubeconfig_path = "/Users/you/.kube/kind-my-project"
 ```
 
 ### Command-Line Overrides
 
 ```bash
-# Override a single variable
+# Override cluster name
+cd cluster/
 terraform apply -var="cluster_name=test-cluster"
 
-# Override multiple variables
-terraform apply -var="cluster_name=test" -var="k8s_version=kindest/node:v1.30.0"
-
-# Use a different var file
-terraform apply -var-file="production.tfvars"
+# Then update the app context to match
+cd ../app_demo/
+terraform apply -var="kubeconfig_context=kind-test-cluster"
 ```
 
 ---
 
 ## Learning Exercises
 
-These exercises are designed to teach Terraform and Kubernetes concepts by making incremental changes to this project.
+These exercises teach Terraform and Kubernetes concepts by making incremental changes.
 
 ### Exercise 1: Change the Cluster Name
 
-**Concepts:** Variables, terraform.tfvars, plan output
+**Concepts:** Variables, terraform.tfvars, plan output, multi-module coordination
 
 ```hcl
-# In terraform.tfvars:
+# In cluster/terraform.tfvars:
 cluster_name = "learning-cluster"
 ```
 
-```bash
-terraform plan    # See what changes
-terraform apply   # Note: destroys and recreates (Kind doesn't support rename)
+```hcl
+# In app_demo/terraform.tfvars:
+kubeconfig_context = "kind-learning-cluster"
 ```
 
-**What you'll learn:** How Terraform detects changes and why Kind clusters are immutable.
+```bash
+cd cluster && terraform apply     # Destroys and recreates (Kind is immutable)
+cd ../app_demo && terraform apply # Redeploy app to the new cluster
+```
+
+**What you'll learn:** How Terraform detects changes, why Kind clusters are immutable, and how two root modules coordinate via kubeconfig.
 
 ---
 
@@ -336,10 +454,9 @@ terraform apply   # Note: destroys and recreates (Kind doesn't support rename)
 
 **Concepts:** List variables, dynamic blocks
 
-In `main.tf`, add a new entry to the `nodes` list:
+In `cluster/main.tf`, add a new entry to the `nodes` list:
 
 ```hcl
-    # Add after the last node entry:
     {
       role = "worker"
       labels = {
@@ -349,9 +466,9 @@ In `main.tf`, add a new entry to the `nodes` list:
 ```
 
 ```bash
-terraform plan   # See: 1 to destroy, 1 to create (cluster replacement)
-terraform apply
-kubectl get nodes  # Should show 5 nodes
+cd cluster && terraform plan   # See: destroy + recreate (cluster replacement)
+cd cluster && terraform apply
+kubectl get nodes              # Should show 5 nodes
 ```
 
 **What you'll learn:** How dynamic blocks generate Kubernetes nodes from list data.
@@ -362,7 +479,7 @@ kubectl get nodes  # Should show 5 nodes
 
 **Concepts:** Networking, IP families
 
-In `main.tf`, add `ip_family` to the networking block:
+In `cluster/main.tf`, add `ip_family` to the networking block:
 
 ```hcl
   networking = {
@@ -370,12 +487,12 @@ In `main.tf`, add `ip_family` to the networking block:
     pod_subnet      = "10.200.0.0/16"
     service_subnet  = "10.100.0.0/16"
     kube_proxy_mode = "iptables"
-    ip_family       = "dual"  # Enable IPv4 + IPv6
+    ip_family       = "dual"
   }
 ```
 
 ```bash
-terraform apply
+cd cluster && terraform apply
 kubectl get nodes -o wide   # Check for IPv6 addresses
 kubectl get svc -A          # Services will have dual-stack ClusterIPs
 ```
@@ -388,7 +505,7 @@ kubectl get svc -A          # Services will have dual-stack ClusterIPs
 
 **Concepts:** Kubernetes feature gates, map variables
 
-In `main.tf`, uncomment and customize the `feature_gates` block:
+In `cluster/main.tf`, uncomment and customize the `feature_gates` block:
 
 ```hcl
   feature_gates = {
@@ -397,8 +514,7 @@ In `main.tf`, uncomment and customize the `feature_gates` block:
 ```
 
 ```bash
-terraform apply
-# Verify:
+cd cluster && terraform apply
 kubectl get nodes -o jsonpath='{.items[0].status.conditions}' | jq .
 ```
 
@@ -410,16 +526,16 @@ kubectl get nodes -o jsonpath='{.items[0].status.conditions}' | jq .
 
 **Concepts:** Kubernetes API groups, HCL map keys
 
-In `main.tf`, uncomment and customize the `runtime_config` block:
+In `cluster/main.tf`, uncomment and customize the `runtime_config` block:
 
 ```hcl
   runtime_config = {
-    "api_alpha" = "true"   # Remember: _ becomes / (api/alpha)
+    "api_alpha" = "true"   # "_" becomes "/" (api/alpha)
   }
 ```
 
 ```bash
-terraform apply
+cd cluster && terraform apply
 kubectl api-versions   # Look for alpha API versions
 ```
 
@@ -429,9 +545,9 @@ kubectl api-versions   # Look for alpha API versions
 
 ### Exercise 6: Install a Custom CNI (Calico)
 
-**Concepts:** CNI plugins, disable_default_cni
+**Concepts:** CNI plugins, disable_default_cni, cross-module changes
 
-1. Disable kindnet in the networking block:
+1. Disable kindnet in `cluster/main.tf`:
 
 ```hcl
   networking = {
@@ -440,20 +556,19 @@ kubectl api-versions   # Look for alpha API versions
   }
 ```
 
-2. Add a Helm release for Calico in `main.tf`:
+2. Add a Helm release for Calico in `app_demo/main.tf`:
 
 ```hcl
 resource "helm_release" "calico" {
-  name       = "calico"
-  repository = "https://docs.tigera.io/calico/charts"
-  chart      = "tigera-operator"
-  namespace  = "tigera-operator"
+  name             = "calico"
+  repository       = "https://docs.tigera.io/calico/charts"
+  chart            = "tigera-operator"
+  namespace        = "tigera-operator"
   create_namespace = true
-  depends_on = [module.k8s_cluster]
 }
 ```
 
-**What you'll learn:** How to replace Kind's default CNI with a production-grade one.
+**What you'll learn:** How to replace Kind's default CNI with a production-grade one, and how changes span both root modules.
 
 ---
 
@@ -461,16 +576,11 @@ resource "helm_release" "calico" {
 
 **Concepts:** kind load CLI, local images, container runtime
 
-Since the `kind_load` Terraform resource is not yet in any released provider version, use the Kind CLI directly after cluster creation:
+Since `kind_load` is not yet released, use the Kind CLI directly:
 
 ```bash
-# 1. Pull an image locally
 docker pull nginx:alpine
-
-# 2. Load it into the Kind cluster
-kind load docker-image nginx:alpine --name dev-cluster
-
-# 3. Verify and use it (no registry needed!)
+kind load docker-image nginx:alpine --name dev
 kubectl run test --image=nginx:alpine --restart=Never --image-pull-policy=Never
 kubectl get pod test
 ```
@@ -483,7 +593,7 @@ kubectl get pod test
 
 **Concepts:** kube-proxy modes, IPVS
 
-Change the proxy mode:
+In `cluster/main.tf`, change the proxy mode:
 
 ```hcl
   networking = {
@@ -493,12 +603,11 @@ Change the proxy mode:
 ```
 
 ```bash
-terraform apply
-# Verify IPVS mode:
+cd cluster && terraform apply
 kubectl -n kube-system logs -l k8s-app=kube-proxy | grep "Using ipvs"
 ```
 
-**What you'll learn:** The difference between iptables and IPVS proxy modes and when to use each.
+**What you'll learn:** The difference between iptables and IPVS proxy modes.
 
 ---
 
@@ -506,7 +615,7 @@ kubectl -n kube-system logs -l k8s-app=kube-proxy | grep "Using ipvs"
 
 **Concepts:** DNS resolution, search domains
 
-Add custom DNS search domains:
+In `cluster/main.tf`, add custom DNS search domains:
 
 ```hcl
   networking = {
@@ -516,8 +625,7 @@ Add custom DNS search domains:
 ```
 
 ```bash
-terraform apply
-# Verify inside a pod:
+cd cluster && terraform apply
 kubectl run test --image=busybox --restart=Never -- cat /etc/resolv.conf
 kubectl logs test
 ```
@@ -528,22 +636,26 @@ kubectl logs test
 
 ### Exercise 10: Custom kubeconfig Path
 
-**Concepts:** kubeconfig, pathexpand, file outputs
+**Concepts:** kubeconfig, pathexpand, cross-module coordination
 
-Set a custom kubeconfig path in `terraform.tfvars`:
+In `cluster/terraform.tfvars`:
+
+```hcl
+kubeconfig_path = "/tmp/my-kind-kubeconfig"
+```
+
+In `app_demo/terraform.tfvars`:
 
 ```hcl
 kubeconfig_path = "/tmp/my-kind-kubeconfig"
 ```
 
 ```bash
-terraform apply
-# Use the custom kubeconfig:
-export KUBECONFIG=/tmp/my-kind-kubeconfig
-kubectl get nodes
+cd cluster && terraform apply
+cd ../app_demo && terraform apply
 ```
 
-**What you'll learn:** How Kind generates and writes kubeconfig files.
+**What you'll learn:** How Kind generates kubeconfig files and how both modules can be pointed at a custom location.
 
 ---
 
@@ -551,19 +663,24 @@ kubectl get nodes
 
 **Concepts:** Per-node images, version compatibility
 
-Give the second worker a different Kubernetes version:
+In `cluster/main.tf`, give the GPU worker a different version:
 
 ```hcl
-    # Modify the GPU worker node:
     {
       role  = "worker"
-      image = "kindest/node:v1.30.0"  # Different version!
-      # ... rest of config
+      image = "kindest/node:v1.30.0"
+      labels = {
+        "workload-type"         = "gpu"
+        "hardware-acceleration" = "true"
+      }
+      kubeadm_config_patches = [
+        "kind: JoinConfiguration\nnodeRegistration:\n  kubeletExtraArgs:\n    register-with-taints: \"dedicated=gpu:NoSchedule\"\n"
+      ]
     }
 ```
 
 ```bash
-terraform apply
+cd cluster && terraform apply
 kubectl get nodes -o wide  # Note the different VERSION column
 ```
 
@@ -575,13 +692,13 @@ kubectl get nodes -o wide  # Note the different VERSION column
 
 **Concepts:** Bind mounts, mount propagation
 
-Change the propagation mode on the existing mount:
+In `cluster/main.tf`, change the propagation mode on the existing mount:
 
 ```hcl
     extra_mounts = [{
       host_path      = "/tmp"
       container_path = "/var/local-data"
-      propagation    = "Bidirectional"  # Try different modes
+      propagation    = "Bidirectional"
     }]
 ```
 
@@ -594,20 +711,33 @@ Change the propagation mode on the existing mount:
 
 ---
 
+### Exercise 13: Deploy Your Own App
+
+**Concepts:** Kubernetes resources, Terraform state isolation
+
+Create your own version of `app_demo/` in a sibling folder:
+
+```bash
+mkdir my_app && cd my_app
+```
+
+Use the same `versions.tf` and `variables.tf` from `app_demo/`, then write your own `main.tf` deploying a different image. This demonstrates how the cluster is reusable across multiple applications.
+
+**What you'll learn:** How separated Terraform root modules enable multiple independent deployments on the same cluster.
+
+---
+
 ## Modification Guide
 
-### How to Add a New Helm Chart
-
-1. Add a new `helm_release` resource in `main.tf`:
+### How to Add a New Helm Chart (app_demo/)
 
 ```hcl
 resource "helm_release" "my_chart" {
-  name       = "my-release"
-  repository = "https://charts.example.com"
-  chart      = "my-chart"
-  namespace  = "my-namespace"
+  name             = "my-release"
+  repository       = "https://charts.example.com"
+  chart            = "my-chart"
+  namespace        = "my-namespace"
   create_namespace = true
-  depends_on = [module.k8s_cluster]
 
   set {
     name  = "key"
@@ -616,22 +746,17 @@ resource "helm_release" "my_chart" {
 }
 ```
 
-### How to Add Kubernetes Resources
-
-Use the `kubernetes` provider (already configured):
+### How to Add Kubernetes Resources (app_demo/)
 
 ```hcl
 resource "kubernetes_namespace" "app" {
   metadata {
     name = "my-app"
-    labels = {
-      environment = "development"
-    }
+    labels = { environment = "development" }
   }
-  depends_on = [module.k8s_cluster]
 }
 
-resource "kubernetes_deployment" "app" {
+resource "kubernetes_deployment_v1" "app" {
   metadata {
     name      = "my-app"
     namespace = kubernetes_namespace.app.metadata[0].name
@@ -642,16 +767,12 @@ resource "kubernetes_deployment" "app" {
       match_labels = { app = "my-app" }
     }
     template {
-      metadata {
-        labels = { app = "my-app" }
-      }
+      metadata { labels = { app = "my-app" } }
       spec {
         container {
           name  = "app"
           image = "nginx:latest"
-          port {
-            container_port = 80
-          }
+          port { container_port = 80 }
         }
       }
     }
@@ -659,27 +780,32 @@ resource "kubernetes_deployment" "app" {
 }
 ```
 
-### How to Add More Module Variables
+### How to Add More Module Variables (cluster/)
 
-1. Add the variable in `modules/kind-cluster/variables.tf`
-2. Use the variable in `modules/kind-cluster/main.tf`
-3. Pass the value in the root `main.tf` module call
-4. Optionally expose it as a root variable in root `variables.tf`
+1. Add the variable in `cluster/modules/kind-cluster/variables.tf`
+2. Use the variable in `cluster/modules/kind-cluster/main.tf`
+3. Pass the value in `cluster/main.tf` module call
+4. Optionally expose it as a root variable in `cluster/variables.tf`
 
 ### How to Create a Second Cluster
 
-Duplicate the module call with a different name:
+Duplicate the `cluster/` directory:
+
+```bash
+cp -r cluster/ cluster-staging/
+```
+
+Edit `cluster-staging/terraform.tfvars`:
 
 ```hcl
-module "staging_cluster" {
-  source = "./modules/kind-cluster"
-  cluster_name = "staging"
-  kubernetes_version = var.k8s_version
-  nodes = [
-    { role = "control-plane" },
-    { role = "worker" }
-  ]
-}
+cluster_name = "staging"
+k8s_version  = "kindest/node:v1.30.0"
+```
+
+Then point `app_demo/` at it:
+
+```hcl
+kubeconfig_context = "kind-staging"
 ```
 
 ---
@@ -695,25 +821,29 @@ module "staging_cluster" {
 | `Error: image not found locally` | Build/pull the image first: `docker pull <image>` |
 | Nodes stuck in `NotReady` | Wait 1-2 minutes, or check: `kubectl describe node <name>` |
 | Terraform state out of sync | `terraform refresh` or `kind delete cluster && terraform apply` |
-| `Error: provider not found` | Run `terraform init` to download providers |
+| `Error: provider not found` | Run `terraform init` in the correct subdirectory |
 | Slow cluster creation | Ensure Docker has enough resources (4GB+ RAM recommended) |
+| `Error: context not found` | Check that `kubeconfig_context` in `app_demo/terraform.tfvars` matches the Kind cluster name |
+| App deploy fails after cluster recreate | Run `cd app_demo && terraform init` to refresh provider cache |
 
 ### Resetting Everything
 
 ```bash
 # Nuclear option: delete everything and start fresh
-terraform destroy -auto-approve
+cd app_demo && terraform destroy -auto-approve
+cd ../cluster && terraform destroy -auto-approve
 kind delete clusters --all
-rm -rf .terraform terraform.tfstate*
-terraform init
-terraform apply
+cd ../cluster && rm -rf .terraform terraform.tfstate*
+cd ../app_demo && rm -rf .terraform terraform.tfstate*
+cd ../cluster && terraform init && terraform apply
+cd ../app_demo && terraform init && terraform apply
 ```
 
 ### Checking Provider Versions
 
 ```bash
-terraform providers          # Show providers used by this config
-terraform version            # Show Terraform and provider versions
+cd cluster && terraform providers   # Should show tehcyx/kind
+cd ../app_demo && terraform providers  # Should show hashicorp/helm + hashicorp/kubernetes
 ```
 
 ---
@@ -724,20 +854,24 @@ This project demonstrates these core Terraform concepts:
 
 | Concept | Where Used | What It Does |
 |---------|-----------|--------------|
-| **Modules** | `main.tf` → `modules/kind-cluster/` | Encapsulates reusable infrastructure |
-| **Variables** | `variables.tf` files | Parameterizes configurations |
-| **Outputs** | `outputs.tf` files | Exports values between modules |
+| **Modules** | `cluster/main.tf` → `modules/kind-cluster/` | Encapsulates reusable infrastructure |
+| **Multiple Root Modules** | `cluster/` and `app_demo/` | Separates concerns with independent state |
+| **Variables** | All `variables.tf` files | Parameterizes configurations |
+| **Outputs** | All `outputs.tf` files | Exports values between modules and to the user |
 | **Dynamic Blocks** | `modules/kind-cluster/main.tf` | Generates repeated blocks from lists |
-| **Provider Configuration** | `main.tf` provider blocks | Connects Terraform to APIs |
-| **Version Constraints** | `versions.tf` files | Pins reproducible versions |
+| **Provider Configuration** | `cluster/main.tf`, `app_demo/main.tf` | Connects Terraform to APIs |
+| **kubeconfig Auth** | `app_demo/main.tf` provider blocks | Config-path based cluster authentication |
+| **Certificate Auth** | `cluster/outputs.tf` | TLS client cert/key for direct API access |
+| **Version Constraints** | All `versions.tf` files | Pins reproducible versions |
 | **Type Constraints** | Variable `type` attributes | Validates input shapes |
 | **Optional Fields** | Variable `optional()` | Allows partial object inputs |
 | **Sensitive Values** | Output `sensitive = true` | Protects credentials |
-| **Depends On** | `depends_on` meta-argument | Controls resource ordering |
-| **For Each** | `kind_load` resource | Creates multiple resource instances |
+| **Depends On** | `app_demo/main.tf` | Controls resource ordering |
+| **Validation** | Module variable `validation` blocks | Custom input validation rules |
 | **Try Function** | Module `main.tf` | Safe access to optional attributes |
-| **Validation** | Variable `validation` blocks | Custom input validation rules |
-| **HereDocs** | `<<TOML ... TOML` syntax | Multi-line string literals |
+| **HereDocs** | Multiple files | Multi-line string literals |
+| **Helm Provider** | `app_demo/versions.tf` | Manages Helm chart deployments |
+| **Kubernetes Provider** | `app_demo/versions.tf` | Manages native Kubernetes resources |
 
 ---
 
@@ -747,6 +881,8 @@ This project demonstrates these core Terraform concepts:
 - [Kind Terraform Provider](https://registry.terraform.io/providers/tehcyx/kind/latest/docs)
 - [Kind Provider Source Code](https://github.com/tehcyx/terraform-provider-kind)
 - [Terraform Documentation](https://developer.hashicorp.com/terraform/docs)
+- [Terraform Modules](https://developer.hashicorp.com/terraform/language/modules)
 - [Kubernetes Documentation](https://kubernetes.io/docs/)
 - [NGINX Ingress Controller](https://kubernetes.github.io/ingress-nginx/)
 - [Helm Provider](https://registry.terraform.io/providers/hashicorp/helm/latest/docs)
+- [Kubernetes Provider](https://registry.terraform.io/providers/hashicorp/kubernetes/latest/docs)

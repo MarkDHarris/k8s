@@ -1,8 +1,7 @@
 # =============================================================================
-# ROOT MODULE: outputs.tf
+# CLUSTER MODULE: outputs.tf
 # =============================================================================
-# Outputs defined here are displayed after `terraform apply` completes and
-# can be queried anytime with `terraform output`.
+# Outputs displayed after `terraform apply` and queryable via `terraform output`.
 #
 # TERRAFORM CONCEPT: Root Module Outputs
 # Root module outputs serve three purposes:
@@ -10,14 +9,11 @@
 #   2. Expose values for use by other Terraform configurations (remote state)
 #   3. Provide machine-readable data for scripts (terraform output -json)
 #
-# Outputs marked `sensitive = true` are hidden in CLI output but accessible
-# via `terraform output -raw <name>` or `terraform output -json`.
+# IMPORTANT: The cluster_context output is used by the sibling app_demo/
+# terraform to connect to this cluster. After running `terraform apply` here,
+# note the cluster_context value and use it when configuring app_demo/.
 # =============================================================================
 
-
-# -----------------------------------------------------------------------------
-# Cluster Connection Details
-# -----------------------------------------------------------------------------
 
 output "cluster_endpoint" {
   description = "Kubernetes API server endpoint URL for the Kind cluster"
@@ -29,6 +25,11 @@ output "cluster_name" {
   value       = var.cluster_name
 }
 
+output "cluster_context" {
+  description = "kubectl context name for this cluster (use with app_demo/)"
+  value       = "kind-${var.cluster_name}"
+}
+
 output "kubeconfig" {
   description = <<-EOT
     Full kubeconfig YAML for the cluster. Write to a file to use with kubectl:
@@ -36,24 +37,32 @@ output "kubeconfig" {
       export KUBECONFIG=~/.kube/kind-config
       kubectl get nodes
   EOT
-  value       = module.k8s_cluster.kubeconfig
+  value     = module.k8s_cluster.kubeconfig
+  sensitive = true
+}
+
+output "client_certificate" {
+  description = "TLS client certificate for authenticating to the cluster"
+  value       = module.k8s_cluster.client_certificate
   sensitive   = true
 }
 
-
-# -----------------------------------------------------------------------------
-# Demo NGINX Web Server
-# -----------------------------------------------------------------------------
-
-output "nginx_url" {
-  description = "URL to reach the demo NGINX web server from the host"
-  value       = "http://localhost"
+output "client_key" {
+  description = "TLS client private key for authenticating to the cluster"
+  value       = module.k8s_cluster.client_key
+  sensitive   = true
 }
 
+output "cluster_ca_certificate" {
+  description = "Cluster CA certificate for verifying API server identity"
+  value       = module.k8s_cluster.cluster_ca_certificate
+  sensitive   = true
+}
 
-# -----------------------------------------------------------------------------
-# Post-Apply Instructions
-# -----------------------------------------------------------------------------
+output "node_count" {
+  description = "Total number of nodes in the cluster"
+  value       = var.control_plane_count + var.worker_count
+}
 
 output "instructions" {
   description = "Quick-start instructions displayed after cluster creation"
@@ -63,29 +72,32 @@ output "instructions" {
     ║  Kind Cluster '${var.cluster_name}' created successfully!            ║
     ╚══════════════════════════════════════════════════════════════════╝
 
+    TOPOLOGY: ${var.control_plane_count} control-plane + ${var.worker_count} worker = ${var.control_plane_count + var.worker_count} nodes
+    ─────────────────────────────────────────────────────────────────
+
     QUICK START:
     ─────────────────────────────────────────────────────────────────
     1. Set kubectl context:
        kubectl cluster-info --context kind-${var.cluster_name}
 
-    2. Check all nodes are Ready:
+    2. Check all nodes are Ready (expect ${var.control_plane_count + var.worker_count} nodes):
        kubectl get nodes -o wide
 
-    3. Verify HA (you should see 2 control-plane nodes):
+    3. Verify control-plane nodes (expect ${var.control_plane_count}):
        kubectl get nodes -l node-role.kubernetes.io/control-plane
 
     4. Check node labels:
        kubectl get nodes --show-labels
-
-    5. Check taints on the GPU worker:
-       kubectl describe nodes | grep -A2 Taints
-
-    6. Test the demo NGINX web server:
-       kubectl -n demo get pods
-       curl http://localhost
-
-    7. Export kubeconfig to a file:
+${var.worker_count >= 2 ? "\n    5. Check taints on the GPU worker:\n       kubectl describe nodes | grep -A2 Taints\n" : ""}
+    6. Export kubeconfig to a file:
        terraform output -raw kubeconfig > ~/.kube/kind-${var.cluster_name}
+
+    DEPLOY THE DEMO APP:
+    ─────────────────────────────────────────────────────────────────
+    To deploy a demo NGINX app with ingress, run the sibling terraform:
+       cd ../app_demo
+       terraform init
+       terraform apply
 
     USEFUL COMMANDS:
     ─────────────────────────────────────────────────────────────────
