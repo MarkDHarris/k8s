@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+namespace: tekton-dev
+
+commonLabels:
+  environment: dev
+
+# Patch the pipeline to add dev-specific configuration
+patches:
+  - target:
+      kind: Pipeline
+      name: app-ci
+    patch: |
+      - op: add
+        path: /spec/tasks/0/retries
+        value: 1
+      - op: add
+        path: /spec/tasks/0/timeout
+        value: "10m"

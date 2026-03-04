@@ -1,0 +1,7 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: finally-demo-
+spec:
+  pipelineRef:
+    name: finally-demo

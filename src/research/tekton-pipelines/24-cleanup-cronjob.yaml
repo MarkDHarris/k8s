@@ -1,0 +1,68 @@
+# CronJob that cleans up old PipelineRuns to prevent resource exhaustion.
+# Each PipelineRun creates Pods, PVCs, and metadata that accumulate over time.
+# Production clusters run this daily to keep the namespace clean.
+#
+# This is the same pattern used in:
+#   component-config/alchemists/cleanup-old-pipelineruns/
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cleanup-old-pipelineruns
+  namespace: default
+spec:
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+        spec:
+          serviceAccountName: cronjob-pipeline-trigger
+          restartPolicy: OnFailure
+          containers:
+            - name: cleanup
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "╔══════════════════════════════════════════╗"
+                  echo "║  PipelineRun Cleanup                      ║"
+                  echo "╚══════════════════════════════════════════╝"
+
+                  # Keep the last 5 PipelineRuns, delete the rest
+                  KEEP=5
+                  echo "Keeping the $KEEP most recent PipelineRuns..."
+
+                  # Get all PipelineRuns sorted by creation time (oldest first)
+                  ALL_RUNS=$(kubectl get pipelineruns -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | wc -l | tr -d ' ')
+                  echo "Total PipelineRuns: $ALL_RUNS"
+
+                  if [ "$ALL_RUNS" -gt "$KEEP" ]; then
+                    DELETE_COUNT=$((ALL_RUNS - KEEP))
+                    echo "Deleting $DELETE_COUNT old PipelineRuns..."
+
+                    kubectl get pipelineruns \
+                      --sort-by=.metadata.creationTimestamp \
+                      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+                      | head -n "$DELETE_COUNT" \
+                      | xargs -r kubectl delete pipelinerun
+
+                    echo "Cleanup complete."
+                  else
+                    echo "Nothing to clean up ($ALL_RUNS runs, threshold is $KEEP)."
+                  fi
+
+                  # Also clean up completed TaskRuns not associated with a Pipeline
+                  echo ""
+                  echo "Cleaning orphaned TaskRuns older than 24h..."
+                  kubectl delete taskruns \
+                    --field-selector=status.conditions[0].type=Succeeded \
+                    2>/dev/null || echo "No orphaned TaskRuns to clean."
+
+                  echo ""
+                  echo "Cleanup finished at $(date -u +%Y-%m-%dT%H:%M:%SZ)"

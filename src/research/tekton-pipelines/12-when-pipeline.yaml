@@ -1,0 +1,74 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: conditional-deploy
+spec:
+  params:
+    - name: branch
+      type: string
+      description: The branch being built
+    - name: enable-notifications
+      type: string
+      default: "true"
+      description: Whether to send notifications
+
+  tasks:
+    - name: check
+      taskRef:
+        name: check-branch
+      params:
+        - name: branch
+          value: "$(params.branch)"
+
+    # Only deploy to production if the branch is main
+    - name: deploy-prod
+      when:
+        - input: "$(tasks.check.results.is-main)"
+          operator: in
+          values: ["true"]
+      taskRef:
+        name: run-deploy
+      params:
+        - name: environment
+          value: production
+      runAfter:
+        - check
+
+    # Only deploy to staging if the branch is NOT main
+    - name: deploy-staging
+      when:
+        - input: "$(tasks.check.results.is-main)"
+          operator: in
+          values: ["false"]
+      taskRef:
+        name: run-deploy
+      params:
+        - name: environment
+          value: staging
+      runAfter:
+        - check
+
+    # Only run integration tests for release-type branches
+    - name: integration-tests
+      when:
+        - input: "$(tasks.check.results.branch-type)"
+          operator: in
+          values: ["release", "hotfix"]
+      taskRef:
+        name: run-integration-tests
+      runAfter:
+        - check
+
+    # Only notify if notifications are enabled
+    - name: notify-deploy
+      when:
+        - input: "$(params.enable-notifications)"
+          operator: in
+          values: ["true"]
+      taskRef:
+        name: send-notification
+      params:
+        - name: message
+          value: "Branch $(params.branch) processed. Type: $(tasks.check.results.branch-type)"
+      runAfter:
+        - check

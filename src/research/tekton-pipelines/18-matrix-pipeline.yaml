@@ -1,0 +1,48 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: matrix-demo
+spec:
+  tasks:
+    # Example 1: Matrix with params -- creates a TaskRun for each combination
+    # 3 platforms × 2 environments = 6 parallel TaskRuns
+    - name: cross-platform-test
+      taskRef:
+        name: platform-test
+      matrix:
+        params:
+          - name: platform
+            value:
+              - "linux"
+              - "macos"
+              - "windows"
+          - name: environment
+            value:
+              - "dev"
+              - "staging"
+
+    # Example 2: Matrix with include -- explicit combinations (not cartesian product)
+    # Each include entry creates exactly one TaskRun
+    - name: prod-smoke-test
+      taskRef:
+        name: platform-test
+      matrix:
+        include:
+          - name: linux-prod
+            params:
+              - name: platform
+                value: "linux"
+              - name: environment
+                value: "prod"
+              - name: test-suite
+                value: "smoke"
+          - name: macos-prod
+            params:
+              - name: platform
+                value: "macos"
+              - name: environment
+                value: "prod"
+              - name: test-suite
+                value: "smoke"
+      runAfter:
+        - cross-platform-test

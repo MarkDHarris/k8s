@@ -1,0 +1,7 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: matrix-demo-
+spec:
+  pipelineRef:
+    name: matrix-demo

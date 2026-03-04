@@ -1,0 +1,163 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: subpath-demo
+spec:
+  description: |
+    Demonstrates advanced workspace patterns from production:
+    - subPath to isolate multiple repos on a single PVC
+    - Inline taskSpec for one-off tasks
+    - Reading from one subPath and writing to another
+  params:
+    - name: app-repo
+      type: string
+      default: "https://github.com/tektoncd/pipeline.git"
+    - name: config-repo
+      type: string
+      default: "https://github.com/tektoncd/catalog.git"
+  workspaces:
+    - name: resources
+
+  tasks:
+    # Clone the application repo into resources/app/
+    - name: clone-app
+      taskSpec:
+        params:
+          - name: url
+            type: string
+        workspaces:
+          - name: output
+        results:
+          - name: commit-sha
+            description: The commit SHA of the cloned repo
+        steps:
+          - name: clone
+            image: alpine/git:latest
+            script: |
+              #!/bin/sh
+              cd "$(workspaces.output.path)"
+              git clone --depth 1 "$(params.url)" . 2>&1 | tail -1
+              COMMIT=$(git rev-parse --short HEAD)
+              printf "%s" "$COMMIT" > "$(results.commit-sha.path)"
+              echo "Cloned app repo at $COMMIT"
+              ls -la
+      params:
+        - name: url
+          value: "$(params.app-repo)"
+      workspaces:
+        - name: output
+          workspace: resources
+          subPath: app
+
+    # Clone the config repo into resources/config/
+    - name: clone-config
+      taskSpec:
+        params:
+          - name: url
+            type: string
+        workspaces:
+          - name: output
+        results:
+          - name: commit-sha
+            description: The commit SHA of the cloned repo
+        steps:
+          - name: clone
+            image: alpine/git:latest
+            script: |
+              #!/bin/sh
+              cd "$(workspaces.output.path)"
+              git clone --depth 1 "$(params.url)" . 2>&1 | tail -1
+              COMMIT=$(git rev-parse --short HEAD)
+              printf "%s" "$COMMIT" > "$(results.commit-sha.path)"
+              echo "Cloned config repo at $COMMIT"
+              ls -la
+      params:
+        - name: url
+          value: "$(params.config-repo)"
+      workspaces:
+        - name: output
+          workspace: resources
+          subPath: config
+
+    # Process both repos: read from app/ and config/ subPaths, write to output/
+    - name: merge-and-build
+      runAfter:
+        - clone-app
+        - clone-config
+      taskSpec:
+        workspaces:
+          - name: app-source
+            description: The application source code
+          - name: config-source
+            description: The configuration files
+          - name: output
+            description: Where to write build output
+        steps:
+          - name: show-layout
+            image: alpine:3
+            script: |
+              #!/bin/sh
+              echo "╔══════════════════════════════════════════════════╗"
+              echo "║  Workspace Layout (subPath isolation)            ║"
+              echo "╠══════════════════════════════════════════════════╣"
+              echo ""
+              echo "app-source (subPath: app):"
+              ls "$(workspaces.app-source.path)/" | head -10
+              echo ""
+              echo "config-source (subPath: config):"
+              ls "$(workspaces.config-source.path)/" | head -10
+              echo ""
+              echo "output (subPath: output) -- empty, will write here:"
+              ls "$(workspaces.output.path)/" 2>/dev/null || echo "  (empty)"
+
+          - name: build
+            image: alpine:3
+            script: |
+              #!/bin/sh
+              echo "Building from app + config sources..."
+              APP_FILES=$(find "$(workspaces.app-source.path)" -type f | wc -l | tr -d ' ')
+              CONFIG_FILES=$(find "$(workspaces.config-source.path)" -type f | wc -l | tr -d ' ')
+              echo "  App files: $APP_FILES"
+              echo "  Config files: $CONFIG_FILES"
+
+              cat > "$(workspaces.output.path)/build-manifest.txt" << MANIFEST
+              Build Manifest
+              ==============
+              App files:    $APP_FILES
+              Config files: $CONFIG_FILES
+              Built at:     $(date -u +%Y-%m-%dT%H:%M:%SZ)
+              MANIFEST
+
+              echo "Build manifest written to output workspace"
+      workspaces:
+        - name: app-source
+          workspace: resources
+          subPath: app
+        - name: config-source
+          workspace: resources
+          subPath: config
+        - name: output
+          workspace: resources
+          subPath: output
+
+    # Report reads from the output subPath
+    - name: report
+      runAfter:
+        - merge-and-build
+      taskSpec:
+        workspaces:
+          - name: results
+        steps:
+          - name: show
+            image: alpine:3
+            script: |
+              #!/bin/sh
+              echo "╔══════════════════════════════════════════════════╗"
+              echo "║  Build Report                                    ║"
+              echo "╠══════════════════════════════════════════════════╣"
+              cat "$(workspaces.results.path)/build-manifest.txt"
+              echo "╚══════════════════════════════════════════════════╝"
+      workspaces:
+        - name: results
+          workspace: resources
+          subPath: output

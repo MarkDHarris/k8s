@@ -1,0 +1,12 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: conditional-deploy-feature-
+spec:
+  pipelineRef:
+    name: conditional-deploy
+  params:
+    - name: branch
+      value: "feature/add-login"
+    - name: enable-notifications
+      value: "false"

@@ -1,0 +1,32 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: app-ci
+spec:
+  params:
+    - name: repo-url
+      type: string
+    - name: image-registry
+      type: string
+    - name: app-name
+      type: string
+    - name: environment
+      type: string
+      default: dev
+  workspaces:
+    - name: shared-data
+
+  tasks:
+    - name: build
+      taskRef:
+        name: app-build
+      params:
+        - name: image-registry
+          value: "$(params.image-registry)"
+        - name: app-name
+          value: "$(params.app-name)"
+        - name: environment
+          value: "$(params.environment)"
+      workspaces:
+        - name: source
+          workspace: shared-data

@@ -1,0 +1,12 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: conditional-deploy-main-
+spec:
+  pipelineRef:
+    name: conditional-deploy
+  params:
+    - name: branch
+      value: "main"
+    - name: enable-notifications
+      value: "true"

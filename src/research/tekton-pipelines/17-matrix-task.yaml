@@ -1,0 +1,48 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: platform-test
+spec:
+  description: |
+    A parameterized task that simulates running tests against a specific
+    platform/environment combination. Used with Matrix to fan out across
+    multiple configurations in parallel.
+  params:
+    - name: platform
+      type: string
+      description: Target platform (linux, macos, windows)
+    - name: environment
+      type: string
+      description: Target environment (dev, staging, prod)
+    - name: test-suite
+      type: string
+      default: "all"
+      description: Which test suite to run
+  results:
+    - name: status
+      description: Test result
+    - name: summary
+      description: Human-readable summary
+  steps:
+    - name: run-tests
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        PLATFORM="$(params.platform)"
+        ENV="$(params.environment)"
+        SUITE="$(params.test-suite)"
+
+        echo "╔══════════════════════════════════════════╗"
+        echo "║  Running tests                           ║"
+        echo "╠══════════════════════════════════════════╣"
+        echo "║  Platform:    $PLATFORM"
+        echo "║  Environment: $ENV"
+        echo "║  Suite:       $SUITE"
+        echo "╚══════════════════════════════════════════╝"
+
+        sleep $((1 + $(date +%N | cut -c1) % 3))
+
+        echo ""
+        echo "Tests completed for $PLATFORM/$ENV ($SUITE)"
+        printf "PASS" > "$(results.status.path)"
+        printf "%s/%s: PASS (%s)" "$PLATFORM" "$ENV" "$SUITE" > "$(results.summary.path)"

@@ -1,0 +1,90 @@
+# CronJob that triggers a PipelineRun on a schedule.
+# This is the pattern used in production (alchemists-platform-resources)
+# for scheduled pipelines like nightly builds, cert renewals, and reports.
+#
+# The CronJob:
+# 1. Deletes any existing PipelineRun with the same name (idempotent)
+# 2. Creates a new PipelineRun from an inline spec
+#
+# Prerequisites: A ServiceAccount with permissions to create/delete PipelineRuns.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cronjob-pipeline-trigger
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pipeline-trigger-role
+  namespace: default
+rules:
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelineruns"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelines"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipeline-trigger-binding
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: cronjob-pipeline-trigger
+    namespace: default
+roleRef:
+  kind: Role
+  name: pipeline-trigger-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# The CronJob runs every hour. Adjust the schedule as needed.
+# Production examples:
+#   "0 */6 * * *"   -- every 6 hours (cert renewal check)
+#   "0 2 * * 1-5"   -- 2 AM on weekdays (nightly E2E tests)
+#   "*/30 * * * *"   -- every 30 minutes (sync jobs)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scheduled-pipeline-trigger
+  namespace: default
+spec:
+  schedule: "0 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+        spec:
+          serviceAccountName: cronjob-pipeline-trigger
+          restartPolicy: OnFailure
+          containers:
+            - name: trigger
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Deleting previous run (if exists)..."
+                  kubectl delete pipelinerun scheduled-build --ignore-not-found
+
+                  echo "Creating new PipelineRun..."
+                  kubectl create -f - <<'PIPELINERUN'
+                  apiVersion: tekton.dev/v1
+                  kind: PipelineRun
+                  metadata:
+                    name: scheduled-build
+                  spec:
+                    pipelineRef:
+                      name: retry-timeout-demo
+                    timeouts:
+                      pipeline: "10m"
+                  PIPELINERUN
+
+                  echo "PipelineRun created at $(date -u +%Y-%m-%dT%H:%M:%SZ)"

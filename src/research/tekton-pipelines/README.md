@@ -1,10 +1,12 @@
 # Tekton Pipelines -- Hands-On Lab
 
-A progressive, hands-on lab that takes you from zero to building CI/CD pipelines with [Tekton](https://tekton.dev/) on a local Kind cluster. By the end, you'll understand every concept behind a production Tekton pipeline.
+A progressive, hands-on lab series that takes you from zero to production-expert level with [Tekton](https://tekton.dev/) CI/CD pipelines on a local Kind cluster. Labs 1-5 cover foundations (Tasks, Pipelines, Results, Workspaces). Labs 6-14 cover advanced and production patterns (when expressions, finally blocks, retries, sidecars, matrix, RBAC, bundle resolvers, Kustomize). The Capstone project builds a real cross-compilation Rust pipeline that ties everything together. The Deep Dive sections decode real production pipelines and cover organizational patterns like Prow, Slack notifications, approval workflows, and resource signing.
 
 ---
 
 ## Table of Contents
+
+### Foundations (Labs 1-5)
 
 - [Background: What Is Tekton?](#background-what-is-tekton)
 - [Setup](#setup)
@@ -13,8 +15,27 @@ A progressive, hands-on lab that takes you from zero to building CI/CD pipelines
 - [Lab 3: Results (Passing Data Between Tasks)](#lab-3-results-passing-data-between-tasks)
 - [Lab 4: Workspaces (Shared Storage)](#lab-4-workspaces-shared-storage)
 - [Lab 5: Build Pipeline (Putting It All Together)](#lab-5-build-pipeline-putting-it-all-together)
-- [Lab 6: Real-World Rust Build (rto-rust)](#lab-6-real-world-rust-build-rto-rust)
+
+### Advanced Concepts (Labs 6-14)
+
+- [Lab 6: When Expressions (Conditional Execution)](#lab-6-when-expressions-conditional-execution)
+- [Lab 7: Finally Blocks (Always-Run Tasks)](#lab-7-finally-blocks-always-run-tasks)
+- [Lab 8: Retries and Timeouts (Resilience)](#lab-8-retries-and-timeouts-resilience)
+- [Lab 9: Sidecars (Auxiliary Containers)](#lab-9-sidecars-auxiliary-containers)
+- [Lab 10: Matrix (Fan-Out Parallelism)](#lab-10-matrix-fan-out-parallelism)
+- [Lab 11: Service Accounts, RBAC, and Secrets](#lab-11-service-accounts-rbac-and-secrets)
+- [Lab 12: Advanced Workspaces (SubPath and Inline Tasks)](#lab-12-advanced-workspaces-subpath-and-inline-tasks)
+- [Lab 13: Bundle Resolvers and Task Catalogs](#lab-13-bundle-resolvers-and-task-catalogs)
+- [Lab 14: Production Operations (CronJobs, Cleanup, Kustomize)](#lab-14-production-operations-cronjobs-cleanup-kustomize)
+
+### Capstone Project
+
+- [Capstone: Real-World Rust Build (rto-rust)](#capstone-real-world-rust-build-rto-rust)
+
+### Production Deep Dive
+
 - [Decoding a Production Pipeline](#decoding-a-production-pipeline)
+- [Production Patterns Deep Dive](#production-patterns-deep-dive)
 - [Concept Reference](#concept-reference)
 - [Cleanup](#cleanup)
 - [Additional Resources](#additional-resources)
@@ -536,16 +557,1148 @@ In real pipelines, a final task uploads artifacts to external storage (S3, Artif
 
 ---
 
-## Lab 6: Real-World Rust Build (rto-rust)
+## Lab 6: When Expressions (Conditional Execution)
 
-**Concepts:** Real compilation pipeline, multi-step quality gates, cargo cache sharing via workspaces, result-driven reporting
+**Concepts:** `when` expressions, conditional task execution, result-based branching, `operator: in`
 
-This lab builds a real Rust project -- [rto-rust](https://github.com/MarkDHarris/rto-rust), a terminal-based Return-to-Office attendance tracker. The pipeline clones the repo, runs format checks + linting + 200+ tests, **cross-compiles release binaries for Linux x64, macOS ARM64, and Windows x64**, and produces a build report.
+When expressions let you conditionally skip tasks based on parameter values or results from previous tasks. This is one of the most heavily used patterns in production -- pipelines that deploy to different environments based on the branch, skip notifications when disabled, or gate on approval status.
+
+### How When Expressions Work
+
+```yaml
+tasks:
+  - name: deploy-prod
+    when:
+      - input: "$(tasks.check.results.is-main)"   # value to evaluate
+        operator: in                                # "in" or "notin"
+        values: ["true"]                            # list of acceptable values
+    taskRef:
+      name: run-deploy
+```
+
+If the `when` condition is **not met**, the task is **skipped** (not failed). Downstream tasks that depend on a skipped task via `runAfter` are also skipped, but tasks with no dependency on the skipped task still run.
+
+### Apply and Run
+
+```bash
+# Apply the tasks (check-branch, run-deploy, run-integration-tests, send-notification)
+kubectl apply -f 11-when-tasks.yaml
+
+# Apply the pipeline
+kubectl apply -f 12-when-pipeline.yaml
+
+# Run with branch=main (triggers production deploy + integration tests)
+kubectl create -f 12-when-pipelinerun-main.yaml
+
+# Run with branch=feature/add-login (triggers staging deploy, skips integration tests)
+kubectl create -f 12-when-pipelinerun-feature.yaml
+```
+
+### Observe
+
+```bash
+# Compare the two runs
+tkn pipelinerun list
+
+# Describe each -- notice which tasks were Skipped vs Succeeded
+tkn pipelinerun describe --last
+
+# The "main" run should show:
+#   check:             Succeeded
+#   deploy-prod:       Succeeded    ← when: is-main = "true"
+#   deploy-staging:    Skipped      ← when: is-main != "false"
+#   integration-tests: Succeeded    ← when: branch-type = "release"
+#   notify-deploy:     Succeeded    ← when: enable-notifications = "true"
+
+# The "feature" run should show:
+#   check:             Succeeded
+#   deploy-prod:       Skipped      ← when: is-main != "true"
+#   deploy-staging:    Succeeded    ← when: is-main = "false"
+#   integration-tests: Skipped      ← when: branch-type = "other" (not release/hotfix)
+#   notify-deploy:     Skipped      ← when: enable-notifications = "false"
+```
+
+### Pipeline Execution Graph
+
+```
+                         ┌─────────────┐
+                         │    check    │
+                         │ (check-     │
+                         │  branch)    │
+                         └──────┬──────┘
+                                │
+              ┌─────────────────┼─────────────────┐─────────────┐
+              │ when:           │ when:            │ when:       │ when:
+              │ is-main=true    │ is-main=false    │ type=       │ enable-
+              │                 │                  │ release     │ notif=true
+              ▼                 ▼                  ▼             ▼
+     ┌────────────┐   ┌────────────┐   ┌──────────────┐  ┌──────────┐
+     │deploy-prod │   │deploy-     │   │ integration- │  │ notify-  │
+     │            │   │ staging    │   │ tests        │  │ deploy   │
+     └────────────┘   └────────────┘   └──────────────┘  └──────────┘
+```
+
+### Production Examples
+
+From the `alchemists-platform-resources` repo:
+
+**Conditional notification based on param:**
+```yaml
+# Only send Slack notifications when enabled
+- name: notify-slack
+  when:
+    - input: "$(params.enable-notifications)"
+      operator: in
+      values: ["true"]
+```
+
+**Conditional execution based on approval result:**
+```yaml
+# Only proceed if deployment is approved
+- name: seek-slack-approval
+  when:
+    - input: "$(tasks.is-deployment-manifest-approved.results.is_approved)"
+      operator: in
+      values: ["false"]
+```
+
+### Key Takeaways
+
+- **`when` expressions** skip tasks without failing the pipeline. The task status shows as "Skipped."
+- **Two operators:** `in` (value must be in the list) and `notin` (value must NOT be in the list).
+- **Multiple conditions** on the same task are ANDed -- all must be true for the task to run.
+- **Skipped tasks propagate:** If task B has `runAfter: [A]` and A is skipped, B is also skipped. But if B references A's result, B will fail (the result doesn't exist).
+- This is how production pipelines implement branch-specific behavior, feature flags, and approval gates.
+
+### Further Reading
+
+- [When Expressions](https://tekton.dev/docs/pipelines/pipelines/#using-the-when-field) -- Official reference for `when` syntax, operators, and skip behavior
+- [Guard Task Execution](https://tekton.dev/docs/pipelines/pipelines/#guard-task-execution-using-when-expressions) -- Patterns for conditional execution in Pipelines
+
+---
+
+## Lab 7: Finally Blocks (Always-Run Tasks)
+
+**Concepts:** `finally` block, `$(tasks.status)`, cleanup tasks, notification patterns
+
+Finally tasks **always run**, regardless of whether the pipeline succeeded or failed. This is the Tekton equivalent of `try/finally` in code -- use it for cleanup, notifications, releasing locks, or reporting status.
+
+### How Finally Works
+
+```yaml
+spec:
+  tasks:
+    - name: build       # regular task
+    - name: test        # regular task
+
+  finally:
+    - name: cleanup     # ALWAYS runs, even if build or test failed
+    - name: report      # Also ALWAYS runs (finally tasks run in parallel)
+```
+
+Finally tasks have access to a special variable `$(tasks.status)` which reflects the aggregate pipeline status:
+- `Succeeded` -- all tasks succeeded
+- `Failed` -- at least one task failed
+- `Completed` -- at least one task was skipped (but none failed)
+- `None` -- no tasks executed
+
+### Apply and Run
+
+```bash
+# Apply all tasks + the pipeline
+kubectl apply -f 13-finally-pipeline.yaml
+
+# Run it (the build task randomly fails ~33% of the time)
+kubectl create -f 13-finally-pipelinerun.yaml
+```
+
+### Observe
+
+```bash
+tkn pipelinerun describe --last
+tkn pipelinerun logs --last
+```
+
+**When the build succeeds:**
+```
+ NAME       TASK NAME          STATUS
+ build      flaky-build        Succeeded
+ test       run-tests-finally  Succeeded
+ cleanup    cleanup-resources  Succeeded    ← finally: always runs
+ report     report-status      Succeeded    ← finally: always runs
+```
+
+**When the build fails:**
+```
+ NAME       TASK NAME          STATUS
+ build      flaky-build        Failed       ← random failure
+ test       run-tests-finally  ---          ← skipped (depends on build)
+ cleanup    cleanup-resources  Succeeded    ← finally: STILL runs
+ report     report-status      Succeeded    ← finally: STILL runs
+```
+
+The cleanup and report tasks run in both cases. The `$(tasks.status)` parameter tells them whether the pipeline succeeded or failed.
+
+### Experiment
+
+Run the pipeline several times to see both success and failure paths:
+
+```bash
+for i in 1 2 3 4 5; do
+  kubectl create -f 13-finally-pipelinerun.yaml
+  sleep 2
+done
+tkn pipelinerun list
+```
+
+### Production Examples
+
+From the `alchemists-platform-resources` repo:
+
+**Slack notification on completion:**
+```yaml
+finally:
+  - name: notify-slack
+    when:
+      - input: "$(params.enable-notifications)"
+        operator: in
+        values: ["true"]
+    taskRef:
+      resolver: bundles
+      params:
+        - name: bundle
+          value: "registry.example.com/tekton-catalog/send-to-webhook-slack:v0.1.0"
+    params:
+      - name: slack-channel
+        value: "#platform-alerts"
+      - name: message
+        value: "Pipeline $(tasks.status): $(params.repo-url)"
+```
+
+**Lease release on completion:**
+```yaml
+finally:
+  - name: release-lease
+    taskRef:
+      name: lease-manager
+    params:
+      - name: action
+        value: "release"
+```
+
+### Key Takeaways
+
+- **`finally` tasks always run**, even if regular tasks failed or were skipped.
+- **`$(tasks.status)`** gives the aggregate status of all non-finally tasks.
+- **Finally tasks run in parallel** with each other (they don't have an ordering relationship).
+- **`when` expressions work in finally tasks** -- you can conditionally skip a finally task (e.g., only notify on failure).
+- Finally tasks **cannot** reference results from failed tasks (the results don't exist).
+- This is the standard pattern for Slack notifications, lease release, and cleanup in production.
+
+### Further Reading
+
+- [Finally Tasks](https://tekton.dev/docs/pipelines/pipelines/#adding-finally-to-the-pipeline) -- Official reference for `finally` syntax and behavior
+- [Using Aggregate Pipeline Status](https://tekton.dev/docs/pipelines/pipelines/#using-aggregate-execution-status-of-all-tasks) -- `$(tasks.status)` variable reference
+
+---
+
+## Lab 8: Retries and Timeouts (Resilience)
+
+**Concepts:** `retries`, `timeout` (task-level), `timeouts` (pipeline-level), resilience patterns
+
+Network operations fail. Builds hang. Retries and timeouts are how production pipelines handle the real world.
+
+### How Retries Work
+
+```yaml
+tasks:
+  - name: fetch-data
+    retries: 3          # try up to 4 times total (1 original + 3 retries)
+    taskRef:
+      name: unreliable-fetch
+```
+
+When a task fails, Tekton creates a new TaskRun for the retry. Each retry gets a fresh Pod. The task's `retries` counter decrements until either the task succeeds or all retries are exhausted.
+
+### How Timeouts Work
+
+```yaml
+# Task-level: this task must finish within 10 seconds
+tasks:
+  - name: process-data
+    timeout: "10s"
+    taskRef:
+      name: slow-process
+
+# Pipeline-level: the entire pipeline must finish within these limits
+# (set in the PipelineRun)
+spec:
+  timeouts:
+    pipeline: "5m"      # total wall-clock time for the entire run
+    tasks: "3m"         # total time for all regular tasks
+    finally: "1m"       # total time for all finally tasks
+```
+
+### Apply and Run
+
+```bash
+# Apply the tasks + pipeline
+kubectl apply -f 14-retry-timeout-pipeline.yaml
+
+# Run it
+kubectl create -f 14-retry-timeout-pipelinerun.yaml
+```
+
+### Observe
+
+```bash
+tkn pipelinerun describe --last
+
+# Watch for retry attempts
+tkn pipelinerun logs -f --last
+```
+
+Look for retry attempts in the `describe` output -- you'll see `Retries` next to each task that was retried. The logs show each attempt.
+
+### Experiment: Trigger a Timeout
+
+```bash
+kubectl create -f - <<EOF
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: timeout-test-
+spec:
+  pipelineRef:
+    name: retry-timeout-demo
+  timeouts:
+    pipeline: "30s"
+    tasks: "20s"
+    finally: "10s"
+EOF
+```
+
+With a 20-second task timeout and tasks that take longer (with retries), you'll see tasks time out.
+
+### Production Examples
+
+From the `alchemists-platform-resources` repo:
+
+```yaml
+# Git operations: retry on network failure
+- name: fetch-jumpbox-repository
+  retries: 2
+  taskRef:
+    resolver: bundles
+    params:
+      - name: bundle
+        value: "registry.example.com/tekton-catalog/git-clone:v0.1.0"
+
+# Heavy builds: generous timeout
+- name: skaffold-build-no-cache
+  timeout: "1h30m0s"
+  taskRef:
+    name: skaffold-build-no-cache
+
+# Platform CI: different tasks have different timeouts
+- name: run-e2e-tests
+  timeout: "3h30m0s"
+  retries: 1
+```
+
+### Key Takeaways
+
+- **`retries: N`** means N additional attempts after the first failure (total = N+1 attempts).
+- Each retry creates a **new Pod** -- it's a fresh attempt, not a restart.
+- **Task-level `timeout`** limits individual tasks. If a task times out mid-retry, remaining retries are abandoned.
+- **Pipeline-level `timeouts`** set overall limits: `pipeline` (total), `tasks` (all regular tasks), `finally` (all finally tasks).
+- In production, **git-clone** and **network operations** get retries. **Build tasks** get generous timeouts.
+- If `timeouts.tasks` is reached, regular tasks are cancelled and `finally` tasks begin.
+
+### Further Reading
+
+- [Configuring TaskRun Retries](https://tekton.dev/docs/pipelines/pipelines/#using-the-retries-field) -- Official reference for retry behavior
+- [Configuring Timeouts](https://tekton.dev/docs/pipelines/pipelineruns/#configuring-a-failure-timeout) -- Pipeline and task timeout configuration
+
+---
+
+## Lab 9: Sidecars (Auxiliary Containers)
+
+**Concepts:** Sidecars, auxiliary services, service readiness, Docker-in-Docker pattern
+
+Sidecars are containers that run alongside your Task's Steps in the same Pod. They're used for services that Steps need to interact with: databases, mock APIs, Docker daemons (DinD), or proxy servers.
+
+### How Sidecars Work
+
+```yaml
+spec:
+  steps:
+    - name: use-service
+      image: alpine:3
+      script: |
+        curl http://localhost:8080/api    # access the sidecar via localhost
+
+  sidecars:
+    - name: mock-api
+      image: my-mock-server:latest        # runs alongside steps
+```
+
+Sidecars start before Steps and are terminated after all Steps complete. Since Steps and Sidecars share the same Pod, they communicate via `localhost`.
+
+### Apply and Run
+
+```bash
+# Apply the sidecar task
+kubectl apply -f 15-sidecar-task.yaml
+
+# Run it
+kubectl create -f 16-sidecar-taskrun.yaml
+```
+
+### Observe
+
+```bash
+tkn taskrun logs --last
+
+# You should see:
+# [wait-for-server] Waiting for sidecar HTTP server to be ready...
+# [wait-for-server] Sidecar is ready!
+# [use-sidecar] GET /health:
+# [use-sidecar] {"status": "healthy"}
+# [use-sidecar] GET /data:
+# [use-sidecar] {"items": ["alpha", "beta", "gamma"], ...}
+```
+
+### How It Maps to a Pod
+
+```
+Pod (shared network: localhost)
+├── Container: step-wait-for-server   ← Step 1: waits for sidecar
+├── Container: step-use-sidecar       ← Step 2: queries sidecar
+└── Container: sidecar-mock-server    ← Sidecar: runs Python HTTP server
+                                         (started first, killed after steps finish)
+```
+
+### Production Examples
+
+The `alchemists-platform-resources` repo uses sidecars for Docker-in-Docker (DinD):
+
+```yaml
+# Kind E2E tests: need a Docker daemon for creating Kind clusters
+sidecars:
+  - name: dind
+    image: docker:dind
+    securityContext:
+      privileged: true
+    env:
+      - name: DOCKER_TLS_CERTDIR
+        value: ""
+    volumeMounts:
+      - name: dind-storage
+        mountPath: /var/lib/docker
+```
+
+Other sidecar patterns:
+- **repo-validator**: Sidecar for validation services
+- **render-cli**: Sidecar for rendering tools
+- **e2e-run-task**: Sidecar for test infrastructure
+
+### Key Takeaways
+
+- **Sidecars share the Pod** with Steps -- they communicate via `localhost` and shared volumes.
+- **Sidecars start first** and are killed after all Steps complete.
+- **Wait for readiness**: Steps should poll the sidecar's health endpoint before proceeding (race condition if you don't).
+- **DinD (Docker-in-Docker)** is the most common production sidecar -- it provides a Docker daemon for image building and Kind cluster creation.
+- Sidecars can use `securityContext: { privileged: true }` when needed (e.g., DinD), but this requires cluster-level permissions.
+
+### Further Reading
+
+- [Tekton Sidecars](https://tekton.dev/docs/pipelines/tasks/#using-a-sidecar-in-a-task) -- Official reference for sidecar configuration
+- [Docker-in-Docker with Tekton](https://tekton.dev/docs/how-to-guides/kaniko-build-push/) -- Building images inside Tekton using DinD sidecars
+
+---
+
+## Lab 10: Matrix (Fan-Out Parallelism)
+
+**Concepts:** `matrix.params`, `matrix.include`, cartesian product, fan-out/fan-in
+
+Matrix lets you run a single task multiple times with different parameter combinations -- in parallel. It's the Tekton equivalent of a CI matrix build (e.g., "test on Linux, macOS, and Windows simultaneously").
+
+### Two Matrix Modes
+
+**Cartesian product (`matrix.params`):** Every combination of parameter values:
+```yaml
+matrix:
+  params:
+    - name: platform
+      value: ["linux", "macos", "windows"]    # 3 values
+    - name: env
+      value: ["dev", "staging"]               # 2 values
+# Creates 3 × 2 = 6 parallel TaskRuns
+```
+
+**Explicit combinations (`matrix.include`):** Named parameter sets:
+```yaml
+matrix:
+  include:
+    - name: linux-prod
+      params:
+        - name: platform
+          value: "linux"
+        - name: env
+          value: "prod"
+    - name: macos-prod
+      params:
+        - name: platform
+          value: "macos"
+        - name: env
+          value: "prod"
+# Creates exactly 2 TaskRuns (one per include entry)
+```
+
+### Apply and Run
+
+```bash
+# Apply the parameterized task
+kubectl apply -f 17-matrix-task.yaml
+
+# Apply the pipeline
+kubectl apply -f 18-matrix-pipeline.yaml
+
+# Run it (creates 6 + 2 = 8 parallel TaskRuns!)
+kubectl create -f 18-matrix-pipelinerun.yaml
+```
+
+### Observe
+
+```bash
+# Watch pods spin up in parallel
+kubectl get pods -w
+
+# Describe shows all matrix instances
+tkn pipelinerun describe --last
+
+# View logs for all instances
+tkn pipelinerun logs --last
+```
+
+You'll see 6 pods for `cross-platform-test` (one per platform/environment combination) running simultaneously, followed by 2 pods for `prod-smoke-test`.
+
+### How Matrix Creates TaskRuns
+
+```
+Pipeline: matrix-demo
+│
+├── cross-platform-test (matrix.params: 3 platforms × 2 envs)
+│   ├── TaskRun: linux/dev      ─┐
+│   ├── TaskRun: linux/staging   │
+│   ├── TaskRun: macos/dev       ├── all 6 run in PARALLEL
+│   ├── TaskRun: macos/staging   │
+│   ├── TaskRun: windows/dev     │
+│   └── TaskRun: windows/staging─┘
+│
+└── prod-smoke-test (matrix.include: 2 explicit combos)
+    ├── TaskRun: linux-prod      ─┐ run after cross-platform-test
+    └── TaskRun: macos-prod      ─┘ (both in parallel)
+```
+
+### Production Examples
+
+From the `alchemists-platform-resources` repo:
+
+```yaml
+# populate-namespace-registry: matrix across 10+ repositories
+- name: populate-registries
+  taskRef:
+    name: registry-cli
+  matrix:
+    include:
+      - name: scylla
+        params:
+          - name: repo-name
+            value: "scylla"
+          - name: repo-url
+            value: "https://ghe.example.com/scylla.git"
+      - name: platform-services
+        params:
+          - name: repo-name
+            value: "platform-services"
+          - name: repo-url
+            value: "https://ghe.example.com/platform-services.git"
+      # ... 8 more repos
+```
+
+### Key Takeaways
+
+- **`matrix.params`** creates a cartesian product -- useful for testing across dimensions (platform × version × environment).
+- **`matrix.include`** creates explicit combinations -- useful when the parameter sets aren't a clean grid.
+- All matrix instances **run in parallel** and each gets its own Pod.
+- **Results from matrix tasks** are returned as arrays (one result per instance).
+- Be mindful of resource limits -- a 5×5 matrix creates 25 simultaneous Pods.
+- This is how production pipelines process multiple repositories, clusters, or environments in parallel.
+
+### Further Reading
+
+- [Matrix](https://tekton.dev/docs/pipelines/matrix/) -- Official reference for matrix configuration, result aggregation, and fan-out patterns
+- [Matrix Parameter Combinations](https://tekton.dev/docs/pipelines/matrix/#generating-combinations) -- Detailed examples of params vs include
+
+---
+
+## Lab 11: Service Accounts, RBAC, and Secrets
+
+**Concepts:** ServiceAccount, Role, RoleBinding, Tekton-annotated Secrets, `taskRunTemplate.serviceAccountName`
+
+Production pipelines don't run as the default service account. They use dedicated ServiceAccounts with specific RBAC permissions, linked to Secrets for Git authentication and container registry access. This is a security fundamental.
+
+### How Tekton Uses Service Accounts
+
+```
+PipelineRun
+  └── serviceAccountName: pipeline-runner
+       └── ServiceAccount: pipeline-runner
+            ├── Secret: git-basic-auth         (annotation: tekton.dev/git-0)
+            ├── Secret: registry-credentials   (annotation: tekton.dev/docker-0)
+            └── RoleBinding → Role: pipeline-role
+                 └── Permissions: PVCs, ConfigMaps, Secrets, Pods
+```
+
+Tekton automatically injects annotated Secrets into task Pods:
+- Secrets annotated with `tekton.dev/git-0: https://github.com` are mounted for Git operations targeting that host.
+- Secrets annotated with `tekton.dev/docker-0: https://index.docker.io` are mounted for container registry operations.
+
+### Apply the RBAC Setup
+
+```bash
+# Create the ServiceAccount, Role, RoleBinding, and placeholder Secrets
+kubectl apply -f 19-rbac-setup.yaml
+```
+
+> **Note:** The secrets in `19-rbac-setup.yaml` contain placeholder values. Replace them with real credentials for actual Git/registry access. For this lab, the pipeline works with public repos.
+
+### Apply and Run the Pipeline
+
+```bash
+# Apply the tasks + pipeline
+kubectl apply -f 20-secret-pipeline.yaml
+
+# Run it with the dedicated service account
+kubectl create -f 20-secret-pipelinerun.yaml
+```
+
+### Observe
+
+```bash
+tkn pipelinerun describe --last
+tkn pipelinerun logs --last
+
+# Verify the pod ran with the correct service account
+kubectl get pods -l tekton.dev/pipelineRun --sort-by=.metadata.creationTimestamp -o jsonpath='{range .items[*]}{.metadata.name}: sa={.spec.serviceAccountName}{"\n"}{end}'
+```
+
+### Secret Access Patterns
+
+**Pattern 1: Tekton-annotated secrets (automatic injection):**
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: git-basic-auth
+  annotations:
+    tekton.dev/git-0: https://github.com    # Tekton injects this for github.com URLs
+type: kubernetes.io/basic-auth
+stringData:
+  username: "my-user"
+  password: "my-token"
+```
+
+**Pattern 2: Environment variable from secret:**
+```yaml
+steps:
+  - name: use-api
+    env:
+      - name: API_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: my-api-secret
+            key: token
+```
+
+**Pattern 3: Secret as workspace volume:**
+```yaml
+workspaces:
+  - name: credentials
+    secret:
+      secretName: signing-key
+```
+
+### Production Examples
+
+From the `alchemists-platform-resources` repo:
+
+- **Per-pipeline ServiceAccounts**: `component-build`, `tekton-pipeline-validator`, `namespace-registry-bot`, `certbot`, etc.
+- **RoleBindings per namespace**: Each pipeline namespace has its own RBAC granting the minimum required permissions.
+- **Git auth**: `git-basic-auth` secret linked to internal GitHub Enterprise (`ghe.privatelinks.awswd`).
+- **Registry auth**: `registry-credentials` secret for pulling task bundles from private registries.
+- **Signing keys**: `approvable-resources` secret mounted as a volume for JWT RSA256 signing.
+- **SecretsPolicy/SecretsAccess**: Custom CRDs for enterprise secret injection (organization-specific pattern).
+
+### Key Takeaways
+
+- **Every production pipeline should have its own ServiceAccount** with minimum required permissions.
+- **Tekton-annotated secrets** (`tekton.dev/git-0`, `tekton.dev/docker-0`) are automatically injected -- no manual mounting needed.
+- **`taskRunTemplate.serviceAccountName`** in the PipelineRun applies the SA to all tasks. Individual tasks can override with `taskRunTemplate` at the task level.
+- **Never use the default service account** for pipelines that access Git repos, registries, or secrets.
+- **Separate secrets per concern**: Git auth, registry auth, API tokens, and signing keys should be different secrets.
+
+### Further Reading
+
+- [Authentication for Tekton](https://tekton.dev/docs/pipelines/auth/) -- Official guide for configuring Git and Docker authentication
+- [Using ServiceAccounts](https://tekton.dev/docs/pipelines/pipelineruns/#specifying-a-serviceaccount) -- Linking ServiceAccounts to PipelineRuns
+- [Kubernetes RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) -- Role, ClusterRole, RoleBinding, ClusterRoleBinding reference
+
+---
+
+## Lab 12: Advanced Workspaces (SubPath and Inline Tasks)
+
+**Concepts:** `subPath`, inline `taskSpec`, multi-repo workspace sharing, workspace partitioning
+
+Production pipelines often clone multiple repositories and combine their contents for a single build. The key pattern: **one PVC, multiple subPaths**. This lab also introduces **inline taskSpec** -- embedding task definitions directly in the pipeline.
+
+### The SubPath Pattern
+
+```
+Single PVC (volumeClaimTemplate)
+├── app/        ← subPath: clone-app writes here
+├── config/     ← subPath: clone-config writes here
+└── output/     ← subPath: merge-and-build writes here
+```
+
+Each task gets a different "view" of the same volume by specifying `subPath`:
+
+```yaml
+workspaces:
+  - name: output
+    workspace: resources
+    subPath: app          # task sees /workspace/output → PVC/app/
+```
+
+### Apply and Run
+
+```bash
+# Apply the pipeline (all tasks are inline)
+kubectl apply -f 21-subpath-pipeline.yaml
+
+# Run it
+kubectl create -f 21-subpath-pipelinerun.yaml
+```
+
+### Observe
+
+```bash
+tkn pipelinerun logs -f --last
+tkn pipelinerun describe --last
+```
+
+The output shows:
+1. Two repos cloned into separate subPaths (`app/` and `config/`)
+2. A build task that reads from both subPaths and writes to a third (`output/`)
+3. A report task that reads from the output subPath
+
+### How It Compares to the Production Pattern
+
+**This lab:**
+```yaml
+- name: clone-app
+  workspaces:
+    - name: output
+      workspace: resources
+      subPath: app
+
+- name: clone-config
+  workspaces:
+    - name: output
+      workspace: resources
+      subPath: config
+```
+
+**Production `agr-jumpbox`:**
+```yaml
+- name: fetch-jumpbox-repository
+  workspaces:
+    - name: output
+      workspace: resources
+      subPath: repo
+
+- name: fetch-venice-client
+  workspaces:
+    - name: output
+      workspace: resources
+      subPath: venice-client
+
+- name: compile-venice-client
+  workspaces:
+    - name: source
+      workspace: resources
+      subPath: venice-client    # reads from source checkout
+    - name: output
+      workspace: resources
+      subPath: repo             # writes compiled binary into main repo
+```
+
+The compile tasks read from one subPath and write to another -- this is how multiple compiled binaries end up in the main repo directory for the final container image build.
+
+### Inline taskSpec vs Separate Tasks
+
+This lab uses **inline taskSpec** instead of separate Task resources:
+
+```yaml
+# Inline: task definition embedded in the pipeline
+- name: clone-app
+  taskSpec:              # ← embedded definition
+    steps:
+      - name: clone
+        image: alpine/git:latest
+        script: |
+          git clone ...
+
+# vs. Separate: reference a Task that exists in the cluster
+- name: clone-app
+  taskRef:               # ← reference to existing Task
+    name: git-clone
+```
+
+**When to use inline taskSpec:**
+- One-off tasks specific to this pipeline
+- Simple scripts that don't warrant a separate resource
+- Quick prototyping
+
+**When to use separate Tasks (taskRef):**
+- Reusable tasks shared across pipelines
+- Tasks maintained in a catalog
+- Tasks distributed via bundles
+
+### Key Takeaways
+
+- **`subPath`** partitions a single PVC into isolated directories for each task.
+- Tasks can **read from one subPath and write to another** -- this is how production pipelines combine multiple source repos into a single build.
+- **Inline `taskSpec`** is convenient for one-off tasks but not reusable across pipelines.
+- The production `agr-jumpbox` pipeline clones **8 repositories** into subPaths, compiles each, and builds a container image from the combined output.
+
+### Further Reading
+
+- [Workspace SubPaths](https://tekton.dev/docs/pipelines/workspaces/#using-subpath) -- Official reference for subPath configuration
+- [Inline Task Definitions](https://tekton.dev/docs/pipelines/pipelines/#specifying-the-target-task) -- Using taskSpec in pipelines
+
+---
+
+## Lab 13: Bundle Resolvers and Task Catalogs
+
+**Concepts:** Bundle resolver, OCI bundles, `tkn bundle push`, task catalogs, versioned tasks
+
+Bundle resolvers are how production teams distribute and version Tekton Tasks. Instead of `kubectl apply -f task.yaml` on every cluster, you package the Task as an OCI image (like a Docker image) and push it to a container registry. Pipelines then reference it by registry URL and version tag.
+
+### The Three TaskRef Styles
+
+| Style | Syntax | Use Case |
+|-------|--------|----------|
+| **Cluster reference** | `taskRef: { name: my-task }` | Task exists in the same namespace |
+| **Inline taskSpec** | `taskSpec: { steps: [...] }` | One-off task, no reuse needed |
+| **Bundle resolver** | `taskRef: { resolver: bundles, params: [...] }` | Versioned task from a registry |
+
+### How Bundle Resolvers Work
+
+```
+┌──────────────────┐     ┌───────────────────────────┐     ┌──────────────────┐
+│ Task YAML        │     │ Container Registry         │     │ Pipeline         │
+│ (git-clone.yaml) │ ──→ │ registry.example.com/      │ ←── │ resolver: bundles│
+│                  │push │ tekton-catalog/git-clone   │pull │ bundle: ...      │
+│                  │     │ :v0.1.0-abc1234            │     │ name: git-clone  │
+└──────────────────┘     └───────────────────────────┘     └──────────────────┘
+```
+
+### Apply and Run
+
+```bash
+# Apply the bundleable task + demo pipeline
+kubectl apply -f 22-bundle-pipeline.yaml
+
+# Run it (demonstrates cluster ref + inline styles; bundle ref is commented)
+kubectl create -f 22-bundle-pipelinerun.yaml
+```
+
+### Creating a Bundle (Reference)
+
+To package and push a Task as a bundle:
+
+```bash
+# Package a task as an OCI bundle and push to a registry
+tkn bundle push docker.io/myorg/tekton-catalog/git-clone:v1.0.0 \
+  -f 22-bundle-pipeline.yaml
+
+# List contents of a bundle
+tkn bundle list docker.io/myorg/tekton-catalog/git-clone:v1.0.0
+```
+
+### Bundle Resolver Syntax
+
+```yaml
+taskRef:
+  resolver: bundles
+  params:
+    - name: bundle
+      value: "docker-images-release.example.com/tekton-catalog/git-clone:v0.1.0-e4c4b48"
+    - name: name
+      value: git-clone
+    - name: kind
+      value: Task
+    - name: secret
+      value: registry-credentials   # for private registries
+```
+
+### Production Pattern: Kustomize Patches for Bundle Migration
+
+The `alchemists-platform-resources` repo uses **Kustomize JSON 6902 patches** to convert cluster-local `taskRef` to bundle resolvers per cluster:
+
+```yaml
+# kustomization.yaml
+patches:
+  - target:
+      kind: Pipeline
+      name: my-pipeline
+    patch: |
+      - op: replace
+        path: /spec/tasks/0/taskRef
+        value:
+          resolver: bundles
+          params:
+            - name: bundle
+              value: "registry.example.com/catalog/git-clone:v0.1.0"
+            - name: name
+              value: git-clone
+            - name: kind
+              value: Task
+```
+
+This lets you develop with cluster-local tasks and deploy with bundle resolvers -- same Pipeline definition, different taskRef at deploy time.
+
+### Tekton Pipelines Bundle Resolver Configuration
+
+Production clusters configure the bundle resolver with caching:
+
+```yaml
+# Tekton Pipelines config
+bundleresolver:
+  cachemode: always      # cache resolved bundles
+resolver:
+  maxsize: 1000          # max number of cached resolutions
+  ttl: 72h               # cache TTL
+```
+
+### Key Takeaways
+
+- **Bundle resolvers** enable versioned, distributable task catalogs stored in container registries.
+- **`tkn bundle push`** packages Task YAML as an OCI image. **`resolver: bundles`** pulls it at runtime.
+- **The `secret` param** authenticates against private registries (e.g., `registry-credentials`).
+- Production teams maintain a **centralized task catalog** with versioned tasks. Pipelines pin to specific versions (e.g., `git-clone:v0.1.0-e4c4b48`).
+- **Kustomize patches** can swap cluster-local taskRefs for bundle resolvers per environment.
+- Bundle resolution is **cached** in production for performance (configured in Tekton Pipelines config).
+
+### Further Reading
+
+- [Bundles Resolver](https://tekton.dev/docs/pipelines/bundle-resolver/) -- Official bundle resolver reference
+- [Remote Resolution](https://tekton.dev/docs/pipelines/resolution/) -- Framework for all resolvers (bundles, git, hub, cluster)
+- [Tekton Bundle Contracts](https://tekton.dev/docs/pipelines/tekton-bundle-contracts/) -- OCI format specification for bundles
+- [tkn bundle](https://tekton.dev/docs/cli/#tekton-cli-bundle) -- CLI reference for creating and inspecting bundles
+
+---
+
+## Lab 14: Production Operations (CronJobs, Cleanup, Kustomize)
+
+**Concepts:** CronJob-triggered pipelines, PipelineRun cleanup, Kustomize overlays for Tekton, namespace-per-pipeline pattern
+
+This lab covers the operational patterns that keep production Tekton clusters running smoothly. These aren't Tekton features per se -- they're Kubernetes patterns wrapped around Tekton.
+
+### Pattern 1: CronJob-Triggered Pipelines
+
+Production pipelines are triggered by **Prow** (webhook-based) or **CronJobs** (time-based). CronJobs handle scheduled work: nightly E2E tests, certificate renewals, periodic reports, and sync jobs.
+
+The pattern:
+1. CronJob runs a kubectl container on a schedule
+2. Deletes any previous PipelineRun with the same name (idempotent)
+3. Creates a new PipelineRun
+
+```bash
+# Review the CronJob + required RBAC
+cat 23-cronjob-trigger.yaml
+
+# Apply it (creates ServiceAccount, Role, RoleBinding, CronJob)
+kubectl apply -f 23-cronjob-trigger.yaml
+
+# Verify the CronJob is created
+kubectl get cronjobs
+
+# Manually trigger it to test (instead of waiting for the schedule)
+kubectl create job --from=cronjob/scheduled-pipeline-trigger manual-trigger-test
+```
+
+### Key CronJob Configuration
+
+```yaml
+spec:
+  schedule: "0 * * * *"          # when to run (cron syntax)
+  concurrencyPolicy: Forbid      # don't start a new job if the previous is still running
+  successfulJobsHistoryLimit: 3  # keep 3 completed jobs for debugging
+  failedJobsHistoryLimit: 3      # keep 3 failed jobs for debugging
+```
+
+Production examples:
+- `"0 */6 * * *"` -- every 6 hours (certificate renewal check)
+- `"0 2 * * 1-5"` -- 2 AM weekdays (nightly E2E tests)
+- `"*/30 * * * *"` -- every 30 minutes (sync jobs)
+
+> **Note:** CronJob pods set `sidecar.istio.io/inject: "false"` because they're short-lived and don't need service mesh traffic management.
+
+### Pattern 2: PipelineRun Cleanup
+
+PipelineRuns accumulate over time. Each one creates Pods, PVCs, and metadata. Without cleanup, the namespace fills up. Production clusters run a daily CronJob to delete old runs.
+
+```bash
+# Review the cleanup CronJob
+cat 24-cleanup-cronjob.yaml
+
+# Apply it
+kubectl apply -f 24-cleanup-cronjob.yaml
+
+# Manually test the cleanup
+kubectl create job --from=cronjob/cleanup-old-pipelineruns manual-cleanup-test
+```
+
+### Pattern 3: Kustomize for Tekton Resource Management
+
+Production Tekton resources are managed with **Kustomize**, not raw `kubectl apply`. This enables:
+- **Base definitions** shared across environments
+- **Per-cluster overlays** for environment-specific configuration
+- **JSON 6902 patches** to swap taskRefs for bundle resolvers
+
+```bash
+# Review the Kustomize structure
+ls -la 25-kustomize/
+ls -la 25-kustomize/base/
+ls -la 25-kustomize/overlays/dev/
+ls -la 25-kustomize/overlays/prod/
+
+# Build and preview the dev overlay
+kubectl kustomize 25-kustomize/overlays/dev/
+
+# Build and preview the prod overlay
+kubectl kustomize 25-kustomize/overlays/prod/
+
+# Apply the dev overlay
+kubectl apply -k 25-kustomize/overlays/dev/
+```
+
+### Kustomize Structure
+
+```
+25-kustomize/
+├── base/
+│   ├── kustomization.yaml     # resources + common labels
+│   ├── task.yaml              # base task definition
+│   └── pipeline.yaml          # base pipeline definition
+└── overlays/
+    ├── dev/
+    │   └── kustomization.yaml # namespace: tekton-dev, retries: 1, timeout: 10m
+    └── prod/
+        └── kustomization.yaml # namespace: tekton-prod, retries: 3, timeout: 1h
+```
+
+### Production Kustomize Pattern
+
+The `alchemists-platform-resources` repo uses this structure per team namespace:
+
+```
+component-config/
+└── skates/
+    └── skates-pipelines/
+        └── namespaces/
+            └── agr-jumpbox/
+                ├── pipelines/
+                │   ├── pipeline.yaml
+                │   └── kustomization.yaml
+                ├── service-accounts/
+                │   ├── sa.yaml
+                │   └── kustomization.yaml
+                └── kustomization.yaml        # includes pipelines + service-accounts
+```
+
+With per-cluster overlays that patch bundle resolver URLs:
+
+```
+clusters/
+├── cpe-004/
+│   └── kustomization.yaml   # patches for cpe-004 cluster
+├── cpe-005/
+│   └── kustomization.yaml   # patches for cpe-005 cluster
+└── s0050/
+    └── kustomization.yaml   # patches for s0050 cluster
+```
+
+### Pattern 4: Namespace-per-Pipeline
+
+Production Tekton resources are organized by namespace:
+
+```
+Namespace: agr-jumpbox
+├── Pipeline: agr-jumpbox
+├── ServiceAccount: component-build
+├── Secret: git-basic-auth
+├── Secret: registry-credentials
+├── RoleBinding: component-build-binding
+└── CronJob: (if scheduled)
+
+Namespace: platform-validation
+├── Pipeline: platform-services-ci
+├── Pipeline: platform-ci-aws-e2e-tests
+├── ServiceAccount: platform-test
+├── Secret: git-basic-auth
+└── RoleBinding: platform-test-binding
+```
+
+Each pipeline gets its own namespace with:
+- Dedicated ServiceAccount and RBAC
+- Pipeline-specific secrets
+- Kustomization for that namespace
+- Optional HNC (Hierarchical Namespaces) for shared parent config
+
+### Key Takeaways
+
+- **CronJobs** are the standard way to trigger scheduled pipeline runs in production.
+- **`concurrencyPolicy: Forbid`** prevents overlapping runs.
+- **Cleanup CronJobs** are essential -- without them, old PipelineRuns consume resources indefinitely.
+- **Kustomize** manages environment-specific Tekton config: different namespaces, timeouts, retries, and bundle resolver URLs per cluster.
+- **Namespace-per-pipeline** provides isolation: each pipeline's RBAC, secrets, and resources are scoped to its namespace.
+- **HNC (Hierarchical Namespace Controller)** lets child namespaces inherit config from a parent (e.g., `tekton-pipelines`).
+
+### Further Reading
+
+- [Kustomize Documentation](https://kustomize.io/) -- Official Kustomize reference
+- [Kubernetes CronJobs](https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/) -- CronJob configuration reference
+- [Hierarchical Namespaces (HNC)](https://github.com/kubernetes-sigs/hierarchical-namespaces) -- Namespace hierarchy and policy inheritance
+
+---
+
+## Capstone: Real-World Rust Build (rto-rust)
+
+**Concepts applied:** This capstone project ties together nearly every concept from the preceding labs -- Tasks, Pipelines, Params, Results, Workspaces, multi-step Tasks, parallel execution, and result-driven reporting. It builds a real Rust project with cross-compilation for three platforms.
+
+> **Prerequisites:** Complete Labs 1-5 (at minimum) before attempting this capstone. Labs 6-14 will deepen your understanding of the patterns used here.
+
+This capstone builds a real Rust project -- [rto-rust](https://github.com/MarkDHarris/rto-rust), a terminal-based Return-to-Office attendance tracker. The pipeline clones the repo, runs format checks + linting + 200+ tests, **cross-compiles release binaries for Linux x64, macOS ARM64, and Windows x64**, and produces a build report.
 
 ### What Makes This Different from Lab 5
 
-| Lab 5 | Lab 6 |
-|-------|-------|
+| Lab 5 | Capstone |
+|-------|----------|
 | Lightweight tasks (alpine containers) | Heavy tasks (full Rust toolchain, ~1.5GB image) |
 | Simulated tests | Real `cargo test` suite (200+ tests) |
 | No actual compilation | Real `cargo build --release` with cross-compilation for 3 platforms |
@@ -571,7 +1724,7 @@ Results:         Results:                       Results:
   short-sha        check-status
 ```
 
-The `check` task is a **multi-step Task** -- three quality checks run as separate Steps in the same Pod. Each step that needs a non-default toolchain component (`rustfmt`, `clippy`) installs it at the start of its script.
+The `check` task is a **multi-step Task** (Lab 2) -- three quality checks run as separate Steps in the same Pod. Each step that needs a non-default toolchain component (`rustfmt`, `clippy`) installs it at the start of its script.
 
 ### Why Each Step Installs Its Own Tools (The Container Filesystem Gotcha)
 
@@ -638,7 +1791,7 @@ The `build` task compiles release binaries for three platforms from a Linux cont
 
 **Why two Steps instead of one?** Linux and Windows can share a single `rust:1.93` container -- both just need `apt-get install` for their cross-linkers. macOS is different: it needs Apple's CoreFoundation framework (via `chrono` → `iana_time_zone` → `core_foundation_sys`), which requires the macOS SDK. The [`rust-linux-darwin-builder`](https://github.com/joseluisq/rust-linux-darwin-builder) image bundles osxcross + the macOS SDK, so we use it as a separate Step.
 
-**The container filesystem gotcha still applies.** The `build-linux-and-windows` step installs `gcc-x86-64-linux-gnu` and `gcc-mingw-w64-x86-64` to the container filesystem -- they're gone when `build-macos` starts in its own container. That's fine because the macOS step uses a completely different toolchain (osxcross). Both steps share the workspace, so the compiled binaries from step 1 are visible to steps 2 and 3.
+**The container filesystem gotcha still applies.** The `build-linux-and-windows` step installs `gcc-x86-64-linux-gnu` and `gcc-mingw-w64-x86-64` to the container filesystem -- they're gone when `build-macos` starts in its own container. That's fine because the macOS step uses a completely different toolchain (osxcross). Both steps share the workspace (Lab 4), so the compiled binaries from step 1 are visible to steps 2 and 3.
 
 **Why can't cargo-zigbuild handle macOS?** We tried it initially. Zig can produce Mach-O binaries for pure Rust projects, but `rto-rust` links against Apple's CoreFoundation framework (via `chrono`). Zig's sysroot doesn't include proprietary Apple frameworks. The osxcross image solves this by bundling an actual macOS SDK.
 
@@ -676,10 +1829,10 @@ Without this, each Pod would re-download all dependencies from crates.io. With i
 
 ```bash
 # Apply all four tasks + the pipeline
-kubectl apply -f 11-rto-rust-pipeline.yaml
+kubectl apply -f 26-rto-rust-pipeline.yaml
 
 # Start the build
-kubectl create -f 12-rto-rust-pipelinerun.yaml
+kubectl create -f 27-rto-rust-pipelinerun.yaml
 ```
 
 ### Observe the Build
@@ -807,7 +1960,7 @@ This is why the production `agr-jumpbox` pipeline ends with `skaffold-build` -- 
 
 ### Experiment: Build a Different Branch or Fork
 
-The pipeline accepts parameters, so you can build any branch or fork:
+The pipeline accepts parameters (Lab 2), so you can build any branch or fork:
 
 ```bash
 kubectl create -f - <<EOF
@@ -963,7 +2116,7 @@ ls /workspace/rto-rust/target/x86_64-pc-windows-gnu/release/        # Windows x6
 | `unable to find framework 'CoreFoundation'` | macOS target requires Apple's SDK (via osxcross) | Use the `joseluisq/rust-linux-darwin-builder` image which bundles osxcross + SDK |
 | `oa64-clang: command not found` | macOS build step not using the darwin builder image | Ensure the `build-macos` step uses `joseluisq/rust-linux-darwin-builder:latest` |
 | `OOMKilled` | Rust compilation needs lots of RAM (cross-compiling 3 targets amplifies this) | Give Kind more Docker memory (8GB+) or reduce parallelism with `CARGO_BUILD_JOBS=1` |
-| `No space left on device` | 5Gi PVC is full (cross-compilation triples build output) | Increase PVC size in `12-rto-rust-pipelinerun.yaml` |
+| `No space left on device` | 5Gi PVC is full (cross-compilation triples build output) | Increase PVC size in `27-rto-rust-pipelinerun.yaml` |
 | Very slow / hanging | First-time dependency download | Be patient; check `tkn pipelinerun logs -f --last` for progress |
 | `error[E0658]: edition 2024 is unstable` | Rust version too old | Ensure the image tag matches the project's required version |
 
@@ -971,10 +2124,10 @@ ls /workspace/rto-rust/target/x86_64-pc-windows-gnu/release/        # Windows x6
 
 ```bash
 # Re-apply the fixed pipeline definition
-kubectl apply -f 11-rto-rust-pipeline.yaml
+kubectl apply -f 26-rto-rust-pipeline.yaml
 
 # Start a fresh run (each run is independent)
-kubectl create -f 12-rto-rust-pipelinerun.yaml
+kubectl create -f 27-rto-rust-pipelinerun.yaml
 
 # Clean up old failed runs (optional)
 tkn pipelinerun delete --all -f
@@ -982,12 +2135,14 @@ tkn pipelinerun delete --all -f
 
 ### Key Takeaways
 
-- **Multi-step Tasks** are the right pattern when steps need shared filesystem access (cargo cache, build artifacts).
-- **`CARGO_HOME` on the workspace** is a real-world technique for sharing dependency caches across tasks. The same pattern works for `GOPATH`, `npm_config_cache`, `pip cache`, etc.
+- **Multi-step Tasks** (Lab 2) are the right pattern when steps need shared filesystem access (cargo cache, build artifacts).
+- **`CARGO_HOME` on the workspace** (Lab 4) is a real-world technique for sharing dependency caches across tasks. The same pattern works for `GOPATH`, `npm_config_cache`, `pip cache`, etc.
 - **Cross-compilation in CI** is practical with the right toolchains. MinGW handles Windows from Linux; `gcc-x86-64-linux-gnu` handles Linux x64 from ARM. macOS requires the Apple SDK (bundled in the `rust-linux-darwin-builder` image via osxcross). Different targets can use different container images within the same Task.
 - **Real builds are slow.** The first run downloads ~200 crate dependencies, installs cross-compilation tools, and compiles for three targets. This is why production pipelines invest in caching, pre-built base images, and incremental builds.
-- **The pipeline is parameterized** -- the same definition can build any branch, tag, or fork by changing `repo-url` and `revision`.
+- **The pipeline is parameterized** (Lab 2) -- the same definition can build any branch, tag, or fork by changing `repo-url` and `revision`.
 - **Debugging pipelines** follows a funnel: PipelineRun → Task → Step → Pod → Container logs. The `tkn` CLI and `kubectl logs` are your primary tools.
+- **Results** (Lab 3) carry metadata like commit SHAs, test counts, and binary sizes through the pipeline graph.
+- **Workspaces** (Lab 4) carry the actual source code and compiled artifacts between tasks.
 
 ### Further Reading
 
@@ -1197,6 +2352,315 @@ Container image builds can be slow. This sets a per-task timeout. Pipelines and 
 
 ---
 
+## Production Patterns Deep Dive
+
+This section covers patterns from the `alchemists-platform-resources` repo that go beyond what can be demonstrated in a local Kind cluster. Understanding these is essential for working effectively in the production codebase.
+
+### Prow Integration (Pipeline Triggering)
+
+Production pipelines are triggered by **Prow**, not Tekton Triggers. Prow is a Kubernetes-native CI/CD system originally built for the Kubernetes project. It watches GitHub events (PRs, pushes, comments) and triggers Tekton PipelineRuns.
+
+**How it works:**
+
+```
+GitHub PR opened/updated
+  → Prow webhook receives event
+    → Prow matches rules in .prow.yaml
+      → Prow creates a PipelineRun with appropriate params
+        → Tekton runs the pipeline
+          → Prow reports status back to GitHub
+```
+
+**`.prow.yaml` structure:**
+
+```yaml
+presubmits:      # runs on PR (before merge)
+  - name: platform-services-ci
+    agent: tekton-pipeline
+    pipeline_run_spec:
+      pipelineRef:
+        name: platform-services-ci
+      params:
+        - name: PULL_PULL_SHA
+          value: "..."
+      workspaces:
+        - name: resources
+          volumeClaimTemplate:
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 10Gi
+
+postsubmits:     # runs after merge to main
+  - name: publish-on-merge
+    agent: tekton-pipeline
+    pipeline_run_spec:
+      pipelineRef:
+        name: publish-svc-manifests-on-merge
+```
+
+**Key Prow concepts:**
+- **`presubmits`**: Run on every PR update (like CI checks)
+- **`postsubmits`**: Run after merge to main (like CD triggers)
+- **`agent: tekton-pipeline`**: Tells Prow to create a Tekton PipelineRun (vs. a Kubernetes Job)
+- **Prow params**: `PULL_PULL_SHA`, `REPO_NAME`, `PULL_BASE_REF` etc. are injected by Prow
+- **`timeout`**: Prow-level timeout (separate from Tekton's timeout)
+
+> **Why Prow instead of Tekton Triggers?** The organization standardized on Prow before Tekton Triggers matured. Prow provides GitHub status reporting, `/test` and `/retest` comment commands, merge automation, and tide (automatic merging). Tekton Triggers RBAC is configured in the repo but the feature is disabled (`enable: false`).
+
+### Slack Notifications
+
+Production pipelines send notifications to Slack channels on completion (success or failure). This is implemented as a catalog task resolved via bundle.
+
+**Pattern:**
+
+```yaml
+finally:
+  - name: notify-slack
+    when:
+      - input: "$(params.enable-notifications)"
+        operator: in
+        values: ["true"]
+    taskRef:
+      resolver: bundles
+      params:
+        - name: bundle
+          value: "registry.example.com/tekton-catalog/send-to-webhook-slack:v0.1.0"
+        - name: name
+          value: send-to-webhook-slack
+        - name: kind
+          value: Task
+    params:
+      - name: slack-channel
+        value: "#platform-alerts"
+      - name: message
+        value: "Pipeline $(context.pipelineRun.name) $(tasks.status)"
+      - name: webhook-secret
+        value: scylla-slack-webhook
+```
+
+**Key points:**
+- Notifications go in `finally` blocks so they always run
+- `enable-notifications` param lets you disable them for testing
+- The webhook URL is stored in a Kubernetes Secret
+- Different channels for different severity levels (`#alerts` vs `#builds`)
+- Multiple finally tasks can notify different channels about different failures
+
+### Approval Workflows
+
+Some production deployments require human approval before proceeding. The pattern:
+
+1. Pipeline sends an approval request to Slack
+2. A human approves or rejects via a console
+3. Pipeline checks the approval status
+4. If approved, deployment proceeds; if not, pipeline stops
+
+```yaml
+tasks:
+  - name: seek-slack-approval
+    taskRef:
+      name: console-send-deployment-approval-request
+    params:
+      - name: slack-channel
+        value: "#approvers"
+      - name: diff-link
+        value: "$(tasks.get-diff-link.results.url)"
+
+  - name: check-approved
+    taskRef:
+      name: is-deployment-manifest-approved
+    runAfter:
+      - seek-slack-approval
+
+  - name: deploy
+    when:
+      - input: "$(tasks.check-approved.results.is_approved)"
+        operator: in
+        values: ["true"]
+    taskRef:
+      name: kubectl-apply-replace
+    runAfter:
+      - check-approved
+```
+
+**Key points:**
+- The approval task posts to Slack with a link to review changes
+- A separate task polls for approval status
+- `when` expression gates the deployment on approval
+- This is used for production cluster changes, not routine builds
+
+### Lease Management
+
+When multiple pipelines compete for shared resources (like test clusters), lease management prevents conflicts:
+
+```yaml
+tasks:
+  - name: acquire-lease
+    taskRef:
+      name: lease-manager
+    params:
+      - name: action
+        value: "acquire"
+      - name: lease-name
+        value: "test-cluster-01"
+
+  - name: run-e2e-tests
+    runAfter:
+      - acquire-lease
+    taskRef:
+      name: e2e-run-task
+
+finally:
+  - name: release-lease
+    taskRef:
+      name: lease-manager
+    params:
+      - name: action
+        value: "release"
+      - name: lease-name
+        value: "test-cluster-01"
+```
+
+The lease is always released in a `finally` block, even if tests fail.
+
+### Tekton Pipelines Configuration
+
+Production clusters customize Tekton's behavior via ConfigMaps:
+
+```yaml
+# Feature flags
+featureflags:
+  coschedule: isolate-pipelinerun    # each PipelineRun gets its own node affinity
+
+# Default pod template (applied to ALL TaskRun pods)
+config_defaults:
+  default-pod-template:
+    securityContext:
+      runAsUser: 0
+      fsGroup: 0
+    nodeSelector:
+      affinity: tekton              # run on dedicated Tekton nodes
+    tolerations:
+      - key: workerrole
+        operator: Equal
+        value: tekton
+        effect: NoSchedule           # Tekton nodes tainted to exclude non-Tekton pods
+
+# Bundle resolver caching
+bundleresolver:
+  cachemode: always
+resolver:
+  maxsize: 1000
+  ttl: 72h
+```
+
+**Key configurations:**
+- **Node affinity/taints**: Tekton pods run on dedicated nodes, not mixed with application workloads
+- **Security context**: `runAsUser: 0` (root) is common for build tasks that need to install packages
+- **Bundle resolver caching**: Resolved bundles are cached for 72 hours to reduce registry pulls
+- **`coschedule: isolate-pipelinerun`**: Tasks in the same PipelineRun are scheduled together for workspace affinity
+
+### ArgoCD Integration (GitOps)
+
+Some pipelines integrate with ArgoCD for deployments:
+
+```yaml
+- name: sync-argocd
+  taskRef:
+    name: gcp-argocd-sync-component
+  params:
+    - name: component-name
+      value: "my-app"
+    - name: cluster-name
+      value: "prod-cluster"
+```
+
+Pattern: Tekton builds and tests (CI) → pushes to a Git repo → ArgoCD detects the change and deploys (CD).
+
+### Resource Signing
+
+The `signer` task creates JWT RSA256 signatures for Kubernetes resources that require approval:
+
+```yaml
+- name: sign-resources
+  taskRef:
+    name: signer
+  params:
+    - name: resource-path
+      value: "$(workspaces.output.path)/manifests/"
+    - name: annotation-key
+      value: "jwtRSA256-public-2025-03-20.v1.approvable-resources-signature"
+  workspaces:
+    - name: signing-key
+      secret:
+        secretName: approvable-resources    # RSA private key
+```
+
+This is used for resources like Roles, RoleBindings, and ClusterRoles that could escalate privileges. The signature proves they were produced by an authorized pipeline.
+
+### Skaffold for Image Building
+
+Production pipelines use **Skaffold** instead of Kaniko/Buildah for container image builds:
+
+```yaml
+- name: build-image
+  taskRef:
+    resolver: bundles
+    params:
+      - name: bundle
+        value: "registry.example.com/tekton-catalog/skaffold-build-no-cache:v0.1.0"
+  params:
+    - name: tag
+      value: "$(tasks.generate-version.results.version)"
+  workspaces:
+    - name: source
+      workspace: resources
+      subPath: repo
+```
+
+Skaffold handles multi-artifact builds (multiple Dockerfiles in one repo), image tagging, and registry pushing.
+
+### Migration Scripts
+
+The repo contains Python scripts for migrating Tekton resources between API versions:
+
+| Script | Purpose |
+|--------|---------|
+| `patch_pipelines.py` | Convert `taskRef` to bundle resolver format |
+| `migrate_tasks_to_v1.py` | Migrate Tasks from v1beta1 to v1 |
+| `migrate_pipelines_to_v1.py` | Migrate Pipelines to v1; `sidecarOverrides` → `sidecarSpecs` |
+| `migrate_cronjobs_to_v1.py` | Migrate CronJobs to v1 |
+
+These are run once during major upgrades. Understanding them helps when troubleshooting version-related issues.
+
+### Kyverno Policy
+
+Production clusters use **Kyverno** for policy enforcement:
+
+```yaml
+# Prevent Karpenter from evicting Tekton pods
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: karpenter-do-not-evict-tekton
+spec:
+  rules:
+    - name: add-do-not-evict
+      match:
+        resources:
+          namespaces: ["tekton-*"]
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            annotations:
+              karpenter.sh/do-not-evict: "true"
+```
+
+This ensures Tekton build pods aren't disrupted by cluster autoscaling.
+
+---
+
 ## Concept Reference
 
 ### Quick Comparison: Steps vs Tasks vs Pipelines
@@ -1208,6 +2672,45 @@ Container image builds can be slow. This sets a per-task timeout. Pipelines and 
 | **Parallel execution** | No (sequential) | No (sequential steps) | Yes (tasks can run in parallel) |
 | **Use for** | A single command/script | A logical unit (clone, build, test) | An entire workflow |
 
+### Complete Feature Reference
+
+| Feature | Lab | Description |
+|---------|-----|-------------|
+| **Task** | 1 | Reusable unit of work with one or more Steps |
+| **TaskRun** | 1 | Single execution of a Task |
+| **Pipeline** | 3 | DAG of Tasks |
+| **PipelineRun** | 3 | Single execution of a Pipeline |
+| **Params** | 2 | `$(params.name)` -- input parameters |
+| **Results** | 3 | `$(results.name.path)`, `$(tasks.X.results.Y)` -- small data passing |
+| **Workspaces** | 4 | Shared storage between Tasks (PVC, emptyDir, ConfigMap, Secret) |
+| **runAfter** | 3 | Explicit task ordering |
+| **when** | 6 | Conditional task execution |
+| **finally** | 7 | Always-run tasks (cleanup, notifications) |
+| **retries** | 8 | Automatic retry on failure |
+| **timeout** | 8 | Per-task and pipeline-level time limits |
+| **Sidecars** | 9 | Auxiliary containers in the same Pod |
+| **Matrix** | 10 | Fan-out parallelism (cartesian product or explicit combos) |
+| **ServiceAccount** | 11 | Dedicated identity and permissions for pipelines |
+| **Secrets** | 11 | Git auth, registry creds, API tokens |
+| **subPath** | 12 | Workspace partitioning for multi-repo pipelines |
+| **Inline taskSpec** | 12 | Embedded task definitions in pipelines |
+| **Bundle resolver** | 13 | Versioned tasks from OCI container registries |
+| **CronJob triggers** | 14 | Scheduled pipeline execution |
+| **Kustomize** | 14 | Environment-specific Tekton resource management |
+
+### Variable Substitution Reference
+
+| Syntax | Context | Example |
+|--------|---------|---------|
+| `$(params.name)` | Task or Pipeline params | `$(params.repo-url)` |
+| `$(results.name.path)` | Write a result in a Task Step | `printf "value" > $(results.commit.path)` |
+| `$(tasks.taskName.results.resultName)` | Read a result in a Pipeline | `$(tasks.clone.results.commit-sha)` |
+| `$(workspaces.name.path)` | Workspace mount path | `cd $(workspaces.source.path)` |
+| `$(tasks.status)` | Aggregate pipeline status (in finally) | `$(tasks.status)` → Succeeded/Failed |
+| `$(context.pipelineRun.name)` | PipelineRun name | `$(context.pipelineRun.name)` |
+| `$(context.pipeline.name)` | Pipeline name | `$(context.pipeline.name)` |
+| `$(context.task.name)` | Task name | `$(context.task.name)` |
+
 ### Workspace Backing Options
 
 | Type | Use Case | PipelineRun Syntax |
@@ -1217,6 +2720,14 @@ Container image builds can be slow. This sets a per-task timeout. Pipelines and 
 | **emptyDir** | Fast ephemeral storage (no PVC overhead) | `emptyDir: {}` |
 | **configMap** | Read-only config files | `configMap: {name: my-config}` |
 | **secret** | Credentials, keys | `secret: {secretName: my-secret}` |
+
+### TaskRef Styles
+
+| Style | Example | When to Use |
+|-------|---------|-------------|
+| **Cluster ref** | `taskRef: { name: my-task }` | Task exists in cluster via `kubectl apply` |
+| **Inline** | `taskSpec: { steps: [...] }` | One-off task, no reuse |
+| **Bundle** | `taskRef: { resolver: bundles, params: [...] }` | Versioned catalog task |
 
 ### Useful tkn Commands
 
@@ -1241,6 +2752,10 @@ tkn pipelinerun describe <name>
 tkn pipelinerun logs <name>
 tkn pipelinerun logs -f --last    # Stream logs for most recent run
 tkn pipelinerun delete --all      # Clean up old runs
+
+# Bundles
+tkn bundle push <registry>/<name>:<tag> -f task.yaml
+tkn bundle list <registry>/<name>:<tag>
 ```
 
 ---
@@ -1252,11 +2767,38 @@ tkn pipelinerun delete --all      # Clean up old runs
 tkn pipelinerun delete --all -f
 tkn taskrun delete --all -f
 
-# Delete all pipelines and tasks from this lab
-kubectl delete pipeline build-pipeline workspace-demo result-chain rto-rust-build
-kubectl delete task hello greeting generate-name display-result \
+# Delete CronJobs (Lab 14)
+kubectl delete cronjob scheduled-pipeline-trigger cleanup-old-pipelineruns 2>/dev/null
+
+# Delete all pipelines from all labs
+kubectl delete pipeline \
+  build-pipeline workspace-demo result-chain rto-rust-build \
+  conditional-deploy finally-demo retry-timeout-demo \
+  matrix-demo rbac-secret-demo subpath-demo bundle-demo \
+  2>/dev/null
+
+# Delete all tasks from all labs
+kubectl delete task \
+  hello greeting generate-name display-result \
   write-file read-file git-clone-simple run-tests generate-version build-report \
-  rto-clone rto-check rto-build rto-report
+  rto-clone rto-check rto-build rto-report \
+  check-branch run-deploy run-integration-tests send-notification \
+  flaky-build run-tests-finally cleanup-resources report-status \
+  unreliable-fetch slow-process always-fails \
+  sidecar-demo platform-test \
+  clone-private-repo secret-env-demo \
+  bundleable-git-clone \
+  2>/dev/null
+
+# Delete RBAC resources (Lab 11)
+kubectl delete rolebinding pipeline-role-binding pipeline-trigger-binding 2>/dev/null
+kubectl delete role pipeline-role pipeline-trigger-role 2>/dev/null
+kubectl delete serviceaccount pipeline-runner cronjob-pipeline-trigger 2>/dev/null
+kubectl delete secret git-basic-auth registry-credentials demo-api-token 2>/dev/null
+
+# Delete Kustomize-managed resources (Lab 14)
+kubectl delete -k 25-kustomize/overlays/dev/ 2>/dev/null
+kubectl delete -k 25-kustomize/overlays/prod/ 2>/dev/null
 
 # Delete any leftover PVCs from workspace demos
 kubectl delete pvc -l tekton.dev/pipeline
@@ -1280,6 +2822,9 @@ kubectl delete --filename https://storage.googleapis.com/tekton-releases/pipelin
 - [Tekton Dashboard](https://tekton.dev/docs/dashboard/) -- Visual UI for monitoring and managing pipelines
 - [Tekton Triggers](https://tekton.dev/docs/triggers/) -- Event-driven pipeline execution (webhook listeners, GitHub events, etc.)
 - [Tekton Results](https://tekton.dev/docs/results/) -- Long-term storage and querying of pipeline run history
+- [Tekton Chains](https://tekton.dev/docs/chains/) -- Supply chain security: signs TaskRun results and generates provenance attestations
+- [Bundle Resolver](https://tekton.dev/docs/pipelines/bundle-resolver/) -- Resolving tasks from OCI bundles
+- [Matrix](https://tekton.dev/docs/pipelines/matrix/) -- Fan-out parallelism with parameter combinations
 
 ### Guides and Tutorials
 
@@ -1290,12 +2835,22 @@ kubectl delete --filename https://storage.googleapis.com/tekton-releases/pipelin
 - [How to Configure Tekton PipelineRuns](https://oneuptime.com/blog/post/2026-02-02-tekton-pipelineruns/view) -- Deep dive into PipelineRun options
 - [How to Use Tekton Workspaces](https://oneuptime.com/blog/post/2026-02-02-tekton-workspaces/view) -- Workspace patterns and backing options
 - [How to Build a Reusable Tekton Task Catalog](https://oneuptime.com/blog/post/2026-02-09-tekton-task-catalog-reusable/view) -- Designing tasks for reuse across teams
+- [Authentication for Tekton](https://tekton.dev/docs/pipelines/auth/) -- Configuring Git and Docker authentication
+- [Kustomize Documentation](https://kustomize.io/) -- Managing Kubernetes resources with overlays
 
 ### Architecture and Comparisons
 
 - [Tekton vs Jenkins on OpenShift](https://redhat.com/en/blog/tekton-vs-jenkins-whats-better-cicd-pipelines-red-hat-openshift) -- Red Hat's case for Kubernetes-native CI/CD
 - [CI/CD Tools Comparison: GitHub Actions, Jenkins, Tekton, Argo CD](https://jiminbyun.medium.com/ci-cd-tools-comparison-github-actions-jenkins-tekton-and-argo-cd-673d205f9fa8) -- Landscape overview
 - [Is Tekton Still Alive?](https://mkdev.me/posts/is-tekton-still-alive-comparing-tekton-pipelines-with-argo-workflows-argocd-and-jenkins) -- Honest comparison with Argo Workflows and Jenkins
+
+### Related Tools
+
+- [Prow](https://docs.prow.k8s.io/) -- Kubernetes-native CI/CD system that triggers Tekton PipelineRuns from GitHub events
+- [Skaffold](https://skaffold.dev/) -- Container image build and deploy tool used in production pipelines
+- [Kyverno](https://kyverno.io/) -- Kubernetes policy engine used alongside Tekton clusters
+- [ArgoCD](https://argo-cd.readthedocs.io/) -- GitOps continuous delivery tool often paired with Tekton CI
+- [Hierarchical Namespaces (HNC)](https://github.com/kubernetes-sigs/hierarchical-namespaces) -- Namespace hierarchy and policy inheritance
 
 ### Community and Source Code
 
@@ -1304,11 +2859,15 @@ kubectl delete --filename https://storage.googleapis.com/tekton-releases/pipelin
 - [Tekton Enhancement Proposals (TEPs)](https://github.com/tektoncd/community/tree/main/teps) -- Design documents for new features; useful for understanding *why* Tekton works the way it does
 - [CD Foundation](https://cd.foundation/) -- The Linux Foundation project that hosts Tekton alongside Jenkins, Spinnaker, and other CI/CD projects
 
-### Next Steps After This Lab
+### Learning Path Summary
 
-Once you're comfortable with the concepts in this lab, explore these topics:
+| Phase | Labs | You Can Now... |
+|-------|------|---------------|
+| **Beginner** | 1-4 | Write Tasks, pass params, chain results, use workspaces |
+| **Intermediate** | 5 | Build CI pipelines with parallel execution and DAG dependencies |
+| **Advanced** | 6-10 | Use conditional logic, cleanup, retries, sidecars, and matrix parallelism |
+| **Production-Ready** | 11-14 | Configure RBAC/secrets, use bundle resolvers, manage Tekton with Kustomize |
+| **Capstone** | Capstone | Build a real cross-compilation pipeline tying all concepts together |
+| **Expert** | Deep Dive sections | Understand Prow, approval workflows, signing, Tekton config, and all production patterns |
 
-1. **Tekton Triggers** -- Automatically run pipelines in response to Git pushes, pull requests, or webhooks. See [Getting Started with Triggers](https://tekton.dev/docs/getting-started/triggers/).
-2. **Tekton Chains** -- Supply chain security: automatically signs TaskRun results and generates provenance attestations. See [Tekton Chains](https://tekton.dev/docs/chains/).
-3. **Custom Tasks** -- Extend Tekton with your own controllers for approval gates, notifications, or integration with external systems. See [Custom Tasks](https://tekton.dev/docs/pipelines/customruns/).
-4. **GitOps Integration** -- Combine Tekton (CI) with Argo CD (CD) for a full GitOps pipeline where Tekton builds images and Argo CD deploys them.
+After completing all labs and the capstone, you'll have hands-on experience with every Tekton concept used in production. The "Production Patterns Deep Dive" section covers the remaining organizational patterns (Prow, Slack, approvals, signing, ArgoCD integration) that require infrastructure beyond a local Kind cluster.

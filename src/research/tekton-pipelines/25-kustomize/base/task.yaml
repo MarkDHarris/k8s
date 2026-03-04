@@ -1,0 +1,28 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: app-build
+spec:
+  params:
+    - name: image-registry
+      type: string
+    - name: app-name
+      type: string
+    - name: environment
+      type: string
+      default: dev
+  workspaces:
+    - name: source
+  results:
+    - name: image-tag
+      description: The built image tag
+  steps:
+    - name: build
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        echo "Building $(params.app-name) for $(params.environment)"
+        echo "Registry: $(params.image-registry)"
+        TAG="$(params.image-registry)/$(params.app-name):latest"
+        printf "%s" "$TAG" > "$(results.image-tag.path)"
+        echo "Image tag: $TAG"

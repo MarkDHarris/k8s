@@ -1,0 +1,7 @@
+apiVersion: tekton.dev/v1
+kind: TaskRun
+metadata:
+  generateName: sidecar-demo-
+spec:
+  taskRef:
+    name: sidecar-demo

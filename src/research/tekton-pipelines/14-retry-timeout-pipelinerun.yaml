@@ -1,0 +1,11 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: retry-timeout-demo-
+spec:
+  pipelineRef:
+    name: retry-timeout-demo
+  timeouts:
+    pipeline: "5m"
+    tasks: "3m"
+    finally: "1m"

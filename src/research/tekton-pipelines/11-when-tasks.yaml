@@ -1,0 +1,96 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: check-branch
+spec:
+  params:
+    - name: branch
+      type: string
+      description: The branch name to evaluate
+  results:
+    - name: is-main
+      description: "true" if the branch is main, "false" otherwise
+    - name: branch-type
+      description: Classification of the branch (release, feature, hotfix, other)
+  steps:
+    - name: evaluate
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        BRANCH="$(params.branch)"
+        echo "Evaluating branch: $BRANCH"
+
+        if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+          printf "true" > "$(results.is-main.path)"
+        else
+          printf "false" > "$(results.is-main.path)"
+        fi
+
+        case "$BRANCH" in
+          release/*) printf "release" > "$(results.branch-type.path)" ;;
+          feature/*) printf "feature" > "$(results.branch-type.path)" ;;
+          hotfix/*)  printf "hotfix"  > "$(results.branch-type.path)" ;;
+          main|master) printf "release" > "$(results.branch-type.path)" ;;
+          *)         printf "other"   > "$(results.branch-type.path)" ;;
+        esac
+
+        echo "is-main: $(cat $(results.is-main.path))"
+        echo "branch-type: $(cat $(results.branch-type.path))"
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: run-deploy
+spec:
+  params:
+    - name: environment
+      type: string
+      default: staging
+  steps:
+    - name: deploy
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        echo "========================================="
+        echo "  DEPLOYING to $(params.environment)"
+        echo "========================================="
+        echo "Running deployment scripts..."
+        sleep 2
+        echo "Deployment to $(params.environment) complete!"
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: run-integration-tests
+spec:
+  steps:
+    - name: test
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        echo "Running integration tests..."
+        sleep 1
+        echo "All integration tests passed!"
+        printf "PASS" > "$(results.status.path)"
+  results:
+    - name: status
+      description: Test result (PASS or FAIL)
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: send-notification
+spec:
+  params:
+    - name: message
+      type: string
+  steps:
+    - name: notify
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        echo "========================================="
+        echo "  NOTIFICATION"
+        echo "========================================="
+        echo "$(params.message)"
+        echo "========================================="

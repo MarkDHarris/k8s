@@ -1,0 +1,138 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: bundleable-git-clone
+spec:
+  description: |
+    A simplified git-clone task designed to show how tasks are structured
+    for packaging into OCI bundles. In production, this task would be pushed
+    to a container registry and referenced via the bundle resolver.
+  params:
+    - name: url
+      type: string
+      description: Git repository URL
+    - name: revision
+      type: string
+      default: main
+      description: Branch, tag, or commit SHA
+    - name: depth
+      type: string
+      default: "1"
+      description: Clone depth (0 for full history)
+  workspaces:
+    - name: output
+      description: Where to clone the repo
+  results:
+    - name: commit
+      description: The commit SHA that was cloned
+    - name: url
+      description: The repository URL that was cloned
+  steps:
+    - name: clone
+      image: alpine/git:latest
+      script: |
+        #!/bin/sh
+        set -eu
+        CHECKOUT_DIR="$(workspaces.output.path)"
+        cd "$CHECKOUT_DIR"
+        DEPTH_FLAG=""
+        if [ "$(params.depth)" != "0" ]; then
+          DEPTH_FLAG="--depth $(params.depth)"
+        fi
+        git clone $DEPTH_FLAG --branch "$(params.revision)" -- "$(params.url)" .
+        COMMIT=$(git rev-parse HEAD)
+        printf "%s" "$COMMIT" > "$(results.commit.path)"
+        printf "%s" "$(params.url)" > "$(results.url.path)"
+        echo "Cloned $(params.url) at $COMMIT"
+---
+# This pipeline demonstrates THREE ways to reference tasks:
+# 1. Direct cluster reference (taskRef with name)
+# 2. Inline taskSpec (embedded in pipeline)
+# 3. Bundle resolver (commented out -- requires a registry)
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: bundle-demo
+spec:
+  params:
+    - name: repo-url
+      type: string
+      default: "https://github.com/tektoncd/pipeline.git"
+  workspaces:
+    - name: shared-data
+
+  tasks:
+    # Style 1: Direct cluster reference
+    # The task must exist in the cluster (kubectl apply -f)
+    - name: clone-cluster-ref
+      taskRef:
+        name: bundleable-git-clone
+      params:
+        - name: url
+          value: "$(params.repo-url)"
+      workspaces:
+        - name: output
+          workspace: shared-data
+          subPath: cluster-ref
+
+    # Style 2: Inline taskSpec
+    # Task definition is embedded directly -- no separate Task resource needed
+    - name: process-inline
+      runAfter:
+        - clone-cluster-ref
+      taskSpec:
+        workspaces:
+          - name: source
+        steps:
+          - name: count
+            image: alpine:3
+            script: |
+              #!/bin/sh
+              COUNT=$(find "$(workspaces.source.path)" -type f | wc -l | tr -d ' ')
+              echo "Found $COUNT files in the cloned repo"
+      workspaces:
+        - name: source
+          workspace: shared-data
+          subPath: cluster-ref
+
+    # Style 3: Bundle resolver (production pattern)
+    # UNCOMMENT the block below if you have a registry with bundled tasks.
+    # To create a bundle: tkn bundle push <registry>/<name>:<tag> -f task.yaml
+    #
+    # - name: clone-from-bundle
+    #   taskRef:
+    #     resolver: bundles
+    #     params:
+    #       - name: bundle
+    #         value: "docker-images-release.example.com/tekton-task-catalog/git-clone:v0.1.0"
+    #       - name: name
+    #         value: git-clone
+    #       - name: kind
+    #         value: Task
+    #       - name: secret
+    #         value: registry-credentials
+    #   params:
+    #     - name: url
+    #       value: "$(params.repo-url)"
+    #   workspaces:
+    #     - name: output
+    #       workspace: shared-data
+    #       subPath: bundle-ref
+
+    - name: report
+      runAfter:
+        - process-inline
+      taskSpec:
+        steps:
+          - name: summary
+            image: alpine:3
+            script: |
+              #!/bin/sh
+              echo "╔══════════════════════════════════════════════════╗"
+              echo "║  Bundle Demo Complete                            ║"
+              echo "╠══════════════════════════════════════════════════╣"
+              echo "║  Demonstrated:                                   ║"
+              echo "║  1. Direct cluster taskRef                       ║"
+              echo "║  2. Inline taskSpec                              ║"
+              echo "║  3. Bundle resolver (see comments in YAML)       ║"
+              echo "╚══════════════════════════════════════════════════╝"

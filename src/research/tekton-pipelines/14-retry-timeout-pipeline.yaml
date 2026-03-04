@@ -1,0 +1,103 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: unreliable-fetch
+spec:
+  params:
+    - name: url
+      type: string
+  results:
+    - name: data
+      description: Fetched data
+  steps:
+    - name: fetch
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        echo "Fetching data from $(params.url)..."
+        ATTEMPT=$(($(date +%N) % 4))
+        if [ "$ATTEMPT" -eq 0 ]; then
+          echo "ERROR: Connection timeout (simulated)"
+          exit 1
+        fi
+        echo "Successfully fetched data"
+        printf "data-from-$(params.url)" > "$(results.data.path)"
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: slow-process
+spec:
+  params:
+    - name: duration
+      type: string
+      default: "5"
+      description: How many seconds to simulate processing
+  results:
+    - name: output
+      description: Processing result
+  steps:
+    - name: process
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        echo "Starting slow processing ($(params.duration)s)..."
+        sleep $(params.duration)
+        echo "Processing complete!"
+        printf "processed" > "$(results.output.path)"
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: always-fails
+spec:
+  steps:
+    - name: fail
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        echo "This task always fails (for retry demonstration)"
+        exit 1
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: retry-timeout-demo
+spec:
+  params:
+    - name: fetch-url
+      type: string
+      default: "api.example.com/data"
+
+  tasks:
+    # Retries: task retries up to 3 times on failure
+    - name: fetch-data
+      retries: 3
+      taskRef:
+        name: unreliable-fetch
+      params:
+        - name: url
+          value: "$(params.fetch-url)"
+
+    # Timeout: task must complete within 10 seconds
+    - name: process-data
+      timeout: "10s"
+      taskRef:
+        name: slow-process
+      params:
+        - name: duration
+          value: "3"
+      runAfter:
+        - fetch-data
+
+    # Retries + Timeout combined: retries up to 2 times, each attempt limited to 5s
+    - name: retry-with-timeout
+      retries: 2
+      timeout: "15s"
+      taskRef:
+        name: unreliable-fetch
+      params:
+        - name: url
+          value: "backup.example.com/data"
+      runAfter:
+        - process-data

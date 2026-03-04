@@ -1,0 +1,119 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: flaky-build
+spec:
+  results:
+    - name: status
+      description: Build status
+  steps:
+    - name: build
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        echo "Starting build..."
+        RANDOM_NUM=$(($(date +%s) % 3))
+        if [ "$RANDOM_NUM" -eq 0 ]; then
+          echo "Build FAILED! (simulated failure)"
+          printf "FAILED" > "$(results.status.path)"
+          exit 1
+        fi
+        echo "Build succeeded!"
+        printf "SUCCESS" > "$(results.status.path)"
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: run-tests-finally
+spec:
+  results:
+    - name: test-count
+      description: Number of tests run
+  steps:
+    - name: test
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        echo "Running test suite..."
+        sleep 1
+        echo "42 tests passed"
+        printf "42" > "$(results.test-count.path)"
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: cleanup-resources
+spec:
+  params:
+    - name: aggregate-status
+      type: string
+      description: Status of the pipeline (Succeeded, Failed, etc.)
+  steps:
+    - name: cleanup
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        echo "========================================="
+        echo "  CLEANUP (always runs)"
+        echo "========================================="
+        echo "Pipeline status: $(params.aggregate-status)"
+        echo "Cleaning up temporary resources..."
+        echo "Releasing locks..."
+        echo "Cleanup complete."
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: report-status
+spec:
+  params:
+    - name: aggregate-status
+      type: string
+      description: Status of the pipeline
+  steps:
+    - name: report
+      image: alpine:3
+      script: |
+        #!/bin/sh
+        echo "========================================="
+        echo "  STATUS REPORT (always runs)"
+        echo "========================================="
+        STATUS="$(params.aggregate-status)"
+        if [ "$STATUS" = "Succeeded" ]; then
+          echo "Pipeline PASSED - all tasks succeeded"
+        else
+          echo "Pipeline had FAILURES - status: $STATUS"
+          echo "Check logs for details"
+        fi
+        echo "========================================="
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: finally-demo
+spec:
+  tasks:
+    - name: build
+      taskRef:
+        name: flaky-build
+
+    - name: test
+      taskRef:
+        name: run-tests-finally
+      runAfter:
+        - build
+
+  finally:
+    - name: cleanup
+      taskRef:
+        name: cleanup-resources
+      params:
+        - name: aggregate-status
+          value: "$(tasks.status)"
+
+    - name: report
+      taskRef:
+        name: report-status
+      params:
+        - name: aggregate-status
+          value: "$(tasks.status)"
